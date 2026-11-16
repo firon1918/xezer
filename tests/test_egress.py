@@ -309,14 +309,14 @@ class TestProcessGuard:
         assert res.blocked is False
         assert res.ok is True
 
-    async def test_egress_run_in_scope_loopback(self, load_config):
+    async def test_egress_run_in_scope_still_requires_http_mediation(self, load_config):
         auth = _auth(load_config)
         ctl = EgressController(auth, resolver=lambda h: ["127.0.0.1"],
                                sandbox="off")
         res = await ctl.run([sys.executable, "-c", "print('hi')"],
                             targets=["http://app.example.com/"], timeout=10)
-        assert res.ok is True
-        assert res.stdout.strip() == b"hi"
+        assert res.blocked is True
+        assert b"per-request mediation unavailable" in res.stderr
 
     async def test_egress_run_blocks_out_of_scope(self, load_config):
         auth = _auth(load_config)

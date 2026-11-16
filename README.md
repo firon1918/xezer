@@ -2,7 +2,17 @@
 
 <!-- coderabbit-ai-generated-section:v1:6d38409435fe84d9ba81da2679e8ed0ee2bad553a4c991ea80f8091cd398c3f9 -->
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:260d4760fc69f62844dcb6857db152aea40dd145c213e0ec212d0250b3e9e8c3 -->
+
 # XEzer — avtomatlaşdırılmış təhlükəsizlik yoxlamaları
+
+Cari şəbəkə sərhədi və uyğunluq dəyişiklikləri: [P0 network policy](docs/audit/P0_NETWORK_POLICY.md).
+`--dry-run` indi offline plan verir. Guarded scan subprocess-ləri per-request nəzarət hazır olmadığı üçün bloklanır; external CLI inteqrasiyalarını işlək saymayın.
+
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 XEzer (`qbh/`) Python 3.10+ üzərində recon, zəiflik mühərrikləri, HAR idxalı,
 sübut korrelyasiyası və davamlı skan bərpasını birləşdirir. Core LLM tələb etmir.
@@ -28,7 +38,13 @@ cp config/examples/example_local.yaml config/targets.yaml
 Nümunə yalnız loopback scope verir. Real scope və credential-ları commit etməyin.
 Quraşdırıcı `sudo` işlətmir, PATH dəyişmir; Go/pip/Cargo quraşdırmalarından sonra
 binary-ni yoxlayır. Çatışmayan alət və manual addımlar ayrıca göstərilir.
-`--dry-run` burada installer üçündür; bütün skan rejimləri üçün offline zəmanəti deyil.
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:27a9e085661cee17ad5f1e4008994b6d09fb4898caf0229aeac96488d6fbabda -->
+
+`--dry-run` indi bütün CLI rejimlərində şəbəkəsiz plan çıxarır; installer version probe-ları da işləmir.
+
+<!-- /coderabbit-ai-generated:v1 -->
 ProjectDiscovery `httpx` ilə Python `httpx` toqquşduqda `QBH_HTTPX_BIN` istifadə edin.
 
 ## Əsas axınlar

@@ -133,6 +133,17 @@ def _show_pending_followups(args: argparse.Namespace) -> int:
 
 
 async def run(args: argparse.Namespace) -> int:
+    if getattr(args, 'dry_run', False):
+        import json
+        from qbh.conductor import STAGE_MAP
+        from qbh.installer import TOOLS
+        # Offline construction precedes all auth, installer probes and resume.
+        Config.load(args.config)
+        print(json.dumps({'dry_run': True, 'mode': args.mode,
+                          'stages': sorted(STAGE_MAP),
+                          'external_tools': [tool.name for tool in TOOLS],
+                          'transmission': 'forbidden'}, ensure_ascii=False))
+        return EXIT_OK
     if (args.approve or args.reject) and not args.test_plan:
         print("[!] --approve/--reject requires --test-plan")
         return EXIT_USAGE

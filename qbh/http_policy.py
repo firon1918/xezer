@@ -397,9 +397,20 @@ class HttpPolicy:
                 location = head.get("Location")
                 if location and redirects < self.max_redirects:
                     redirects += 1
-                    current = self.scope.resolve_redirect(current, location)
+                    from urllib.parse import urlsplit
+                    previous = urlsplit(current)
+                    destination = self.scope.resolve_redirect(current, location)
+                    target = urlsplit(destination)
+                    if (previous.scheme, previous.hostname, previous.port) != (target.scheme, target.hostname, target.port):
+                        # Caller cookies, auth objects and body may carry credentials.
+                        from .authorization import RuleForbidden
+                        raise RuleForbidden('cross_origin_redirect_requires_new_request')
+                    current = destination
+                    host = self.scope.authorize(extract_host(current))
+                    await self.acquire(host)
                     if status == 303:
                         method = "GET"
+                        kwargs = {k:v for k,v in kwargs.items() if k not in {'data','json'}}
                     continue
 
             # ---- blok (403/429) → adaptiv strategiya ----
@@ -470,6 +481,63 @@ class HttpPolicy:
             if authorization is not None:
                 authorization.authorize_request(method, url)
             started = time.monotonic()
+            # Real aiohttp callers use a policy-owned connector. Injected mock
+            # sessions remain test doubles and never transmit network traffic.
+            if isinstance(session, aiohttp.ClientSession):
+                from .authorization import Authorization
+                from .network_policy import PolicyResolver, validate_options
+                auth = authorization or Authorization(scope=self.scope)
+                auth.authorize_request(method, url)
+                effective_headers = dict(session.headers)
+                effective_headers.update(headers or {})
+                validate_options(auth, url, effective_headers, call_kwargs)
+                from urllib.parse import urlsplit
+                import ipaddress
+                try:
+                    ipaddress.ip_address(urlsplit(url).hostname)
+                    literal = True
+                except ValueError:
+                    literal = False
+                # curl has independent DNS resolution. Domain traffic must use
+                # the validated connector until curl supports equivalent pinning.
+                if self._use_transport() and literal:
+                    tr = await self.transport.request(
+                        method, url, headers=headers, allow_redirects=False,
+                        cookie_jar=session.cookie_jar, timeout=self.total_timeout, **call_kwargs)
+                    self.transport_requests += 1
+                    elapsed = time.monotonic() - started
+                    if self.metrics is not None:
+                        self.metrics.record_request(host, tr.status, elapsed, transport=True)
+                    return tr.status, dict(tr.headers), tr.text, tr.truncated, elapsed
+                if session.trust_env:
+                    from .authorization import RuleForbidden
+                    raise RuleForbidden('ambient_proxy_settings_forbidden')
+                if literal:
+                    async with session.request(method, url, headers=headers, allow_redirects=False,
+                                               timeout=aiohttp.ClientTimeout(total=self.total_timeout,
+                                                                             connect=self.connect_timeout),
+                                               **call_kwargs) as response:
+                        text, truncated = await self._read_body(response)
+                        elapsed = time.monotonic() - started
+                        if self.metrics is not None:
+                            self.metrics.record_request(host, response.status, elapsed, transport=False)
+                        return response.status, dict(response.headers), text, truncated, elapsed
+                resolver = PolicyResolver(auth)
+                connector = aiohttp.TCPConnector(resolver=resolver, use_dns_cache=False, force_close=True)
+                try:
+                    async with aiohttp.ClientSession(connector=connector, cookie_jar=session.cookie_jar,
+                                                     trust_env=False, headers=session.headers) as secured:
+                        async with secured.request(method, url, headers=headers, allow_redirects=False,
+                                                   timeout=aiohttp.ClientTimeout(total=self.total_timeout,
+                                                                                 connect=self.connect_timeout),
+                                                   **call_kwargs) as response:
+                            text, truncated = await self._read_body(response)
+                            elapsed = time.monotonic() - started
+                            if self.metrics is not None:
+                                self.metrics.record_request(host, response.status, elapsed, transport=False)
+                            return response.status, dict(response.headers), text, truncated, elapsed
+                finally:
+                    await resolver.close()
             if self._use_transport():
                 tr = await self.transport.request(
                     method, url, headers=headers, allow_redirects=False,

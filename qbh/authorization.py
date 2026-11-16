@@ -109,6 +109,7 @@ class Authorization:
     profile_intrusive: bool = True
     #: Uyğunluq sahəsi: əlavə CLI təsdiqi tələb edilmir; YAML qadağası qüvvədədir.
     allow_state_changing: bool = True
+    allowed_ports: tuple = (80, 443)
     dry_run: bool = False
     _cancelled: bool = False
     request_restrictions: list = field(default_factory=list)
@@ -310,6 +311,7 @@ def from_config(cfg, scan_id: int | None = None, *, deadline: float | None = Non
     """`Config`-dən avtorizasiya konteksti qurur."""
     return Authorization(
         scan_id=scan_id,
+        allowed_ports=tuple(getattr(cfg, "network_allowed_ports", (80, 443))),
         scope=cfg.scope,
         rules=cfg.program_rules,
         aggressiveness=cfg.aggressiveness,

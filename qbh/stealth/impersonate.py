@@ -152,7 +152,7 @@ class ImpersonatingTransport:
         started = time.monotonic()
         try:  # pragma: no cover - curl_cffi tələb edir
             # A request-local curl jar prevents ambient cookies crossing callers.
-            async with AsyncSession() as session:
+            async with AsyncSession(trust_env=False) as session:
                 resp = await session.request(
                     method, url, headers=headers, allow_redirects=allow_redirects,
                     proxy=proxy or self.proxy,
