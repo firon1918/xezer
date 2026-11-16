@@ -26,6 +26,7 @@ from .network_policy import validate_options
 
 # Reviewed HTTP-only entry points. Raw TCP/DNS/headless paths need other adapters.
 PROXY_FLAGS = {
+    "httpx": ["-http-proxy", "{XEzer_PROXY}", "-duc"],
     "curl": ["--proxy", "{XEzer_PROXY}", "--noproxy", ""],
     "ffuf": ["-x", "{XEzer_PROXY}"],
     "nuclei": [
@@ -52,6 +53,26 @@ class BrokerPolicy(HttpPolicy):
         ) > self.max_body
 
 
+def broker_policy(auth, policy=None):
+    result = BrokerPolicy(auth.scope, rate=5, max_concurrency=4, max_retries=0)
+    if policy is not None:
+        for name in (
+            "rate",
+            "max_concurrency",
+            "per_host_concurrency",
+            "connect_timeout",
+            "total_timeout",
+            "max_body",
+            "_sem",
+            "_host_sems",
+            "_state",
+            "_host_rate",
+        ):
+            setattr(result, name, getattr(policy, name))
+    result.authorization = auth
+    return result
+
+
 class RequestBroker:
     def __init__(self, auth, directory, audit, policy=None):
         # Imports are optional: callers fail closed when mediation extras are absent.
@@ -64,23 +85,7 @@ class RequestBroker:
         self.h11, self.x509 = h11, x509
         self.hashes, self.serialization, self.rsa = hashes, serialization, rsa
         self.auth, self.directory, self.audit = auth, Path(directory), audit
-        self.policy = BrokerPolicy(auth.scope, rate=5, max_concurrency=4, max_retries=0)
-        if policy is not None:
-            # Keep raw response handling while sharing the native scan budgets.
-            for name in (
-                "rate",
-                "max_concurrency",
-                "per_host_concurrency",
-                "connect_timeout",
-                "total_timeout",
-                "max_body",
-                "_sem",
-                "_host_sems",
-                "_state",
-                "_host_rate",
-            ):
-                setattr(self.policy, name, getattr(policy, name))
-        self.policy.authorization = auth
+        self.policy = broker_policy(auth, policy)
         self.key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         name = x509.Name(
             [x509.NameAttribute(NameOID.COMMON_NAME, "XEzer ephemeral mediation")]
@@ -210,14 +215,9 @@ class RequestBroker:
             self.audit.append(
                 {"event": "mediation_blocked", "reason": "invalid_or_denied_request"}
             )
-            if not writer.is_closing():
-                writer.write(
-                    b"HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                )
-                try:
-                    await writer.drain()
-                except OSError:
-                    pass
+            # A broker denial/transport failure is not an HTTP response from
+            # the target. Close the exchange so scanners cannot turn synthetic
+            # 403/502 responses into findings or suppress HTTP fallback.
         finally:
             writer.close()
             try:
@@ -365,7 +365,7 @@ class RequestBroker:
                 return
 
 
-def sandbox_command(command, directory, outputs=None):
+def sandbox_command(command, directory, outputs=None, *, offline=False):
     """Fresh filesystem, PID/IPC/user/network namespaces; no host sockets/home."""
     executable = shutil.which(command[0])
     if executable is None:
@@ -419,18 +419,21 @@ def sandbox_command(command, directory, outputs=None):
         "--setenv",
         "LANG",
         "C.UTF-8",
-        "--dir",
-        "/broker",
-        "--ro-bind",
-        str(root / "socket"),
-        "/broker/socket",
-        "--ro-bind",
-        str(root / "ca.pem"),
-        "/broker/ca.pem",
-        "--ro-bind",
-        str(Path(__file__).with_name("mediation_child.py")),
-        "/runner.py",
     ]
+    if not offline:
+        args += [
+            "--dir",
+            "/broker",
+            "--ro-bind",
+            str(root / "socket"),
+            "/broker/socket",
+            "--ro-bind",
+            str(root / "ca.pem"),
+            "/broker/ca.pem",
+            "--ro-bind",
+            str(Path(__file__).with_name("mediation_child.py")),
+            "/runner.py",
+        ]
     # Copy executable, never expose its entire installation/home directory.
     if not executable.startswith("/usr/"):
         args += ["--ro-bind", executable, "/tool"]
@@ -458,6 +461,8 @@ def sandbox_command(command, directory, outputs=None):
             rewritten.append(destination)
         else:
             rewritten.append(arg)
+    if offline:
+        return args + ["--chdir", "/tmp", "--", executable, *rewritten]
     return args + [
         "--chdir",
         "/tmp",

@@ -158,6 +158,12 @@ class EgressController:
             self.auth.require_command(cmd)
         except RuleForbidden:
             return ProcResult(-1, stderr=b'egress: tool forbidden by RoE', blocked=True)
+        from .offline_tools import is_offline_command, is_version_probe, run_offline
+        if is_offline_command(cmd) or is_version_probe(cmd):
+            return await run_offline(self, cmd, stdin=stdin, timeout=timeout, cancel_event=cancel_event)
+        if Path(cmd[0]).name == 'jsluice':
+            from .offline_tools import run_remote_jsluice
+            return await run_remote_jsluice(self, cmd, stdin=stdin, timeout=timeout, cancel_event=cancel_event)
         if Path(cmd[0]).name in {'naabu', 'nmap'}:
             from .socket_tools import run_socket_tool
             from .authorization import NotAuthorized
