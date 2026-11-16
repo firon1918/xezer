@@ -158,6 +158,14 @@ class EgressController:
             self.auth.require_command(cmd)
         except RuleForbidden:
             return ProcResult(-1, stderr=b'egress: tool forbidden by RoE', blocked=True)
+        if Path(cmd[0]).name in {'naabu', 'nmap'}:
+            from .socket_tools import run_socket_tool
+            from .authorization import NotAuthorized
+            try:
+                return await run_socket_tool(self, cmd, targets=targets, stdin=stdin,
+                                             timeout=timeout, cancel_event=cancel_event)
+            except (NotAuthorized, RuleForbidden):
+                return ProcResult(-1, stderr=b'egress: socket target or operation not authorized', blocked=True)
         if Path(cmd[0]).name not in PROXY_FLAGS:
             blocked, _ = await self.prepare_process(cmd, targets)
             return blocked

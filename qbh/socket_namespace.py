@@ -10,14 +10,17 @@ from __future__ import annotations
 import ipaddress
 import json
 import secrets
+import shutil
 import subprocess
+import tempfile
+from pathlib import Path
 
 from .authorization import RuleForbidden
 from .network_policy import validate_ip
 
 
 class SocketNamespace:
-    def __init__(self, authorization, destinations, *, ports):
+    def __init__(self, authorization, destinations, *, ports, bindings=None):
         authorization.ensure_active()
         if authorization.dry_run:
             raise RuleForbidden("dry_run_process_forbidden")
@@ -27,18 +30,35 @@ class SocketNamespace:
         self.destinations = tuple(str(ipaddress.ip_address(ip)) for ip in destinations)
         if not self.destinations or len(self.destinations) > 256:
             raise RuleForbidden("invalid_socket_destination_count")
-        # Inputs must already be scope-authorized identities, not arbitrary DNS
-        # answers. Callers cannot use public-address status as a scope grant.
-        for ip in self.destinations:
-            authorization.authorize_host(ip)
-            validate_ip(authorization, ip)
-        self.ports = tuple(sorted(set(ports)))
-        if not self.ports or any(
-            type(p) is not int or not 1 <= p <= 65535 for p in self.ports
-        ):
-            raise RuleForbidden("invalid_socket_ports")
-        if len(self.ports) * len(self.destinations) > 1024:
+        self.bindings = {
+            str(ipaddress.ip_address(ip)): tuple(names)
+            for ip, names in (bindings or {}).items()
+        }
+        self.destination_ports = {
+            ip: tuple(sorted(set(ports[ip] if isinstance(ports, dict) else ports)))
+            for ip in self.destinations
+        }
+        self.port_ranges = {}
+        for ip, values in self.destination_ports.items():
+            if not values or any(
+                type(p) is not int or not 1 <= p <= 65535 for p in values
+            ):
+                raise RuleForbidden("invalid_socket_ports")
+            groups = []
+            start = end = values[0]
+            for port in values[1:]:
+                if port == end + 1:
+                    end = port
+                else:
+                    groups.append(str(start) if start == end else f"{start}:{end}")
+                    start = end = port
+            groups.append(str(start) if start == end else f"{start}:{end}")
+            self.port_ranges[ip] = groups
+        if sum(map(len, self.port_ranges.values())) > 1024:
             raise RuleForbidden("socket_firewall_rule_budget_exceeded")
+        self.validate()
+        self.hosts_file = None
+        self.binary_files = []
         suffix = secrets.token_hex(4)
         self.name = "xez-" + suffix
         self.host_if, self.child_if = "xh" + suffix, "xc" + suffix
@@ -68,7 +88,12 @@ class SocketNamespace:
         if self.auth.dry_run or self.auth.request_restrictions:
             raise RuleForbidden("raw_socket_policy_changed")
         for ip in self.destinations:
-            self.auth.authorize_host(ip)
+            names = self.bindings.get(ip, ())
+            if names:
+                for name in names:
+                    self.auth.authorize_host(name)
+            else:
+                self.auth.authorize_host(ip)
             validate_ip(self.auth, ip)
 
     def __enter__(self):
@@ -179,7 +204,7 @@ class SocketNamespace:
                     "via",
                     self.gateway6 if six else self.gateway,
                 )
-                for port in self.ports:
+                for port in self.port_ranges[ip]:
                     for protocol in ("tcp", "udp"):
                         self.inside(
                             family,
@@ -245,16 +270,26 @@ class SocketNamespace:
                     "MASQUERADE",
                     family=family,
                 )
+            hosts = ["127.0.0.1 localhost", "::1 localhost"]
+            hosts.extend(
+                f"{ip} {name}" for ip, names in self.bindings.items() for name in names
+            )
+            self.hosts_file = tempfile.NamedTemporaryFile(
+                mode="w", prefix="xezer-hosts-", delete=False
+            )
+            self.hosts_file.write("\n".join(hosts) + "\n")
+            self.hosts_file.close()
+            Path(self.hosts_file.name).chmod(0o644)
             return self
         except BaseException:
             self.close()
             raise
 
-    def wrap(self, command):
+    def wrap(self, command, *, timeout=None):
         self.validate()
         # Host root privileges end at bubblewrap; the executable runs without
         # capabilities in a new user/PID/filesystem namespace. No host proc/home.
-        return [
+        args = [
             "sudo",
             "-n",
             "ip",
@@ -305,11 +340,42 @@ class SocketNamespace:
             "/tmp",
             "--chdir",
             "/tmp",
-            *command,
         ]
+        if self.hosts_file:
+            args += ["--ro-bind", self.hosts_file.name, "/etc/hosts"]
+        executable = Path(command[0]).resolve()
+        if not str(executable).startswith("/usr/"):
+            fd = tempfile.NamedTemporaryFile(prefix="xezer-scanner-", delete=False)
+            fd.close()
+            self.binary_files.append(fd.name)
+            shutil.copyfile(executable, fd.name)
+            Path(fd.name).chmod(0o555)
+            args += ["--ro-bind", fd.name, "/scanner"]
+            command = ["/scanner", *command[1:]]
+        if timeout is not None:
+            command = ["/usr/bin/timeout", "-s", "KILL", str(timeout), *command]
+        return args + ["--", *command]
+
+    def terminate(self):
+        if not self.created:
+            return
+        pids = self.command("ip", "netns", "pids", self.name).stdout.decode().split()
+        if pids:
+            self.command("kill", "-KILL", "--", *pids)
 
     def close(self):
         errors = []
+        if self.created:
+            try:
+                self.terminate()
+            except (OSError, subprocess.SubprocessError) as exc:
+                errors.append(exc)
+        for filename in self.binary_files:
+            Path(filename).unlink(missing_ok=True)
+        self.binary_files.clear()
+        if self.hosts_file:
+            Path(self.hosts_file.name).unlink(missing_ok=True)
+            self.hosts_file = None
         for family, table, chain, rule in reversed(self.host_rules):
             try:
                 self.command(family, "-w", "-t", table, "-D", chain, *rule)
