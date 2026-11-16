@@ -230,7 +230,10 @@ class Authorization:
             return False
         if action == "intrusive_templates" and not self.profile_intrusive:
             return False
-        if action in {"destructive", "dos", "data_deletion"}:
+        if action.lower().replace('-', '_') in {
+                "destructive", "destructive_operations", "dos", "ddos", "data_deletion",
+                "resource_exhaustion", "brute_force", "brute_force_attacks", "persistence",
+                "backdoor", "unauthorized_exfiltration"}:
             return False
         return True
 

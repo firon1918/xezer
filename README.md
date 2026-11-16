@@ -6,7 +6,15 @@
 
 <!-- coderabbit-ai-generated-section:v1:260d4760fc69f62844dcb6857db152aea40dd145c213e0ec212d0250b3e9e8c3 -->
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:e7160d59b3621afc21fc6ab950925b164614d66f269ef33e010f95098a1b807f -->
+
 # XEzer — avtomatlaşdırılmış təhlükəsizlik yoxlamaları
+
+Son imkan bərpaları, enterprise scope nümunəsi və qalan adapter məhdudiyyətləri: [capability restoration](docs/audit/CAPABILITY_RESTORATION_REPORT.md).
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 Cari şəbəkə sərhədi və uyğunluq dəyişiklikləri: [P0 network policy](docs/audit/P0_NETWORK_POLICY.md).
 `--dry-run` indi offline plan verir. Guarded scan subprocess-ləri per-request nəzarət hazır olmadığı üçün bloklanır; external CLI inteqrasiyalarını işlək saymayın.

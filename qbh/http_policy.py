@@ -362,6 +362,7 @@ class HttpPolicy:
         rotate_attempts = 0
         current = url
         redirects = 0
+        anonymous_redirect = False
         #: Faza 1 (§6.3): MƏHZ bu sorğu zamanı yaranan blok hadisələri —
         #: konkurent atribusiya üçün `record(..., sink=events)` ilə toplanır.
         events: list[BlockEvent] = []
@@ -379,8 +380,13 @@ class HttpPolicy:
                     if px:
                         call_kwargs["proxy"] = px
             try:
-                status, head, text, truncated, elapsed = await self._fetch_once(
-                    session, method, current, attempt_headers, call_kwargs, host)
+                if anonymous_redirect and isinstance(session, aiohttp.ClientSession):
+                    async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar(), trust_env=False) as anonymous:
+                        status, head, text, truncated, elapsed = await self._fetch_once(
+                            anonymous, method, current, {}, call_kwargs, host)
+                else:
+                    status, head, text, truncated, elapsed = await self._fetch_once(
+                        session, method, current, attempt_headers, call_kwargs, host)
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                 if self.metrics is not None:
                     self.metrics.record_error(
@@ -404,13 +410,18 @@ class HttpPolicy:
                     if (previous.scheme, previous.hostname, previous.port) != (target.scheme, target.hostname, target.port):
                         # Caller cookies, auth objects and body may carry credentials.
                         from .authorization import RuleForbidden
-                        raise RuleForbidden('cross_origin_redirect_requires_new_request')
+                        if status != 303 and (method.upper() not in {'GET', 'HEAD', 'OPTIONS'} or any(k in kwargs for k in ('data', 'json'))):
+                            raise RuleForbidden('cross_origin_body_requires_explicit_replay')
+                        anonymous_redirect = True
+                        headers = {}
+                        kwargs = {k:v for k,v in kwargs.items() if k not in {'auth','cookies'}}
                     current = destination
                     host = self.scope.authorize(extract_host(current))
                     await self.acquire(host)
                     if status == 303:
                         method = "GET"
                         kwargs = {k:v for k,v in kwargs.items() if k not in {'data','json'}}
+                        headers = {k:v for k,v in (headers or {}).items() if k.lower() not in {'content-length','content-type','transfer-encoding'}}
                     continue
 
             # ---- blok (403/429) → adaptiv strategiya ----
@@ -486,7 +497,10 @@ class HttpPolicy:
             if isinstance(session, aiohttp.ClientSession):
                 from .authorization import Authorization
                 from .network_policy import PolicyResolver, validate_options
-                auth = authorization or Authorization(scope=self.scope)
+                if authorization is None:
+                    authorization = Authorization(scope=self.scope)
+                    self.authorization = authorization
+                auth = authorization
                 auth.authorize_request(method, url)
                 effective_headers = dict(session.headers)
                 effective_headers.update(headers or {})
@@ -527,22 +541,33 @@ class HttpPolicy:
                         if self.metrics is not None:
                             self.metrics.record_request(host, response.status, elapsed, transport=False)
                         return response.status, dict(response.headers), text, truncated, elapsed
-                resolver = PolicyResolver(auth)
-                connector = aiohttp.TCPConnector(resolver=resolver, use_dns_cache=False, force_close=True)
-                try:
-                    async with aiohttp.ClientSession(connector=connector, cookie_jar=session.cookie_jar,
-                                                     trust_env=False, headers=session.headers) as secured:
-                        async with secured.request(method, url, headers=headers, allow_redirects=False,
-                                                   timeout=aiohttp.ClientTimeout(total=self.total_timeout,
-                                                                                 connect=self.connect_timeout),
-                                                   **call_kwargs) as response:
-                            text, truncated = await self._read_body(response)
-                            elapsed = time.monotonic() - started
-                            if self.metrics is not None:
-                                self.metrics.record_request(host, response.status, elapsed, transport=False)
-                            return response.status, dict(response.headers), text, truncated, elapsed
-                finally:
-                    await resolver.close()
+                # Install a policy-owned pool on the caller session. Its lifetime,
+                # cookies, authentication and close semantics remain caller-owned.
+                fingerprint = repr((auth.scope, auth.allowed_ports))
+                connector = session.connector
+                binding = getattr(connector, '_xezer_policy_binding', None)
+                if binding is None:
+                    if not session.connector_owner:
+                        raise RuleForbidden('shared_connector_requires_policy_owned_session')
+                    original = connector
+                    resolver = PolicyResolver(auth)
+                    connector = aiohttp.TCPConnector(resolver=resolver, use_dns_cache=False,
+                                                     limit=original.limit, limit_per_host=original.limit_per_host)
+                    connector._resolver_owner = True
+                    connector._xezer_policy_binding = (auth, fingerprint)
+                    session._connector = connector
+                    await original.close()
+                elif binding[0] is not auth or binding[1] != fingerprint:
+                    raise RuleForbidden('policy_changed_requires_new_session')
+                async with session.request(method, url, headers=headers, allow_redirects=False,
+                                           timeout=aiohttp.ClientTimeout(total=self.total_timeout,
+                                                                         connect=self.connect_timeout),
+                                           **call_kwargs) as response:
+                    text, truncated = await self._read_body(response)
+                    elapsed = time.monotonic() - started
+                    if self.metrics is not None:
+                        self.metrics.record_request(host, response.status, elapsed, transport=False)
+                    return response.status, dict(response.headers), text, truncated, elapsed
             if self._use_transport():
                 tr = await self.transport.request(
                     method, url, headers=headers, allow_redirects=False,

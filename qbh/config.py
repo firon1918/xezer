@@ -18,7 +18,7 @@ import yaml
 from .scope import ScopeEnforcer, ScopeError, normalize_host
 
 KNOWN_TOP_KEYS = {
-    "max_reconsideration_rounds", "network_allowed_ports",
+    "max_reconsideration_rounds", "network_allowed_ports", "global_safety_policy",
     "program", "nvd_api_key", "scope", "limits", "proxy_file", "antiblock",
     "aggressiveness", "program_rules", "rotation", "block_strategy", "chain",
     "oob", "stealth", "vault", "vuln", "content", "api_enum", "auth_contexts", "auth_resource_policies", "request_restrictions",
@@ -262,6 +262,14 @@ class Config:
             if key not in KNOWN_TOP_KEYS:
                 warnings.append(f"naməlum konfiq açarı: {key!r}")
 
+        safety = raw.get('global_safety_policy', {})
+        prohibited = {'dos','ddos','resource_exhaustion','brute_force_attacks','persistence','destructive_operations'}
+        if (not isinstance(safety, dict) or set(safety) - {'prohibited_operations'} or
+                not isinstance(safety.get('prohibited_operations', {}), dict)):
+            raise ConfigError('invalid_global_safety_policy')
+        operations = safety.get('prohibited_operations', {})
+        if set(operations) - prohibited or any(v is not True for v in operations.values()):
+            raise ConfigError('global_prohibitions_cannot_be_disabled')
         ports = raw.get('network_allowed_ports', [80, 443])
         if (not isinstance(ports, list) or not ports or
                 any(type(p) is not int or not 1 <= p <= 65535 for p in ports)):
@@ -388,6 +396,8 @@ class Config:
         for i, item in enumerate(scope):
             if not isinstance(item, dict):
                 raise ConfigError(f"scope[{i}] mapping olmalıdır")
+            if 'infrastructure' in item:
+                raise ConfigError('scope.infrastructure is unsupported; put explicit IPs/CIDRs in in_scope')
             domain = item.get("domain")
             if not domain or not isinstance(domain, str):
                 raise ConfigError(f"scope[{i}].domain tələb olunur")

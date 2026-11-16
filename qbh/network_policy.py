@@ -16,7 +16,7 @@ def validate_ip(auth, value):
     # alone never grants access to a private address returned by DNS.
     if not effective.is_global and not (auth.scope.is_authorized(str(effective)) or auth.scope.is_authorized(str(ip))):
         raise RuleForbidden('non_public_address_not_explicitly_authorized')
-    if any(rule.matches(str(effective), effective) for rule in auth.scope.deny):
+    if any(rule.matches(str(effective), effective) or rule.matches(str(ip), ip) for rule in auth.scope.deny):
         raise RuleForbidden('resolved_address_denied')
     return str(ip)
 
@@ -34,9 +34,10 @@ def validate_options(auth, url, headers, options):
         raise RuleForbidden('port_not_authorized')
     for key, value in (headers or {}).items():
         key = key.lower()
-        if key in {'x-http-method-override', 'x-method-override', 'x-http-method',
-                   'x-original-url', 'x-rewrite-url'}:
-            raise RuleForbidden('request_override_header_forbidden')
+        if key in {'x-http-method-override', 'x-method-override', 'x-http-method'}:
+            auth.authorize_request(value, url)
+        if key in {'x-original-url', 'x-rewrite-url'}:
+            raise RuleForbidden('path_override_requires_effective_route_adapter')
         if key == 'host' and value.lower().rstrip('.') != URL(url).authority.lower().rstrip('.'):
             raise RuleForbidden('host_header_mismatch')
     if options.get('proxy') or options.get('proxy_auth'):
@@ -58,11 +59,18 @@ class PolicyResolver(aiohttp.abc.AbstractResolver):
         records = await self.delegate.resolve(host, port, family)
         if not records:
             raise RuleForbidden('empty_dns_answer')
+        permitted = []
         for record in records:
-            validate_ip(self.auth, record['host'])
+            try:
+                validate_ip(self.auth, record['host'])
+            except RuleForbidden:
+                continue
+            permitted.append(record)
+        if not permitted:
+            raise RuleForbidden('no_authorized_dns_candidates')
         # No second DNS lookup: these records are consumed by TCPConnector.
         self.auth.ensure_active()
-        return records
+        return permitted
 
     async def close(self):
         await self.delegate.close()

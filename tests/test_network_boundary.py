@@ -51,7 +51,9 @@ def test_port_and_header_overrides():
     with pytest.raises(RuleForbidden):
         validate_options(auth('example.test'), 'https://example.test:8443/', {}, {})
     with pytest.raises(RuleForbidden):
-        validate_options(auth('example.test'), 'https://example.test/', {'X-HTTP-Method-Override':'DELETE'}, {})
+        policy = auth('example.test')
+        policy.rules.forbidden.add('state_changing')
+        validate_options(policy, 'https://example.test/', {'X-HTTP-Method-Override':'DELETE'}, {})
     with pytest.raises(RuleForbidden):
         validate_options(auth('example.test'), 'https://example.test/', {}, {'proxy':'http://127.0.0.1'})
 
@@ -101,7 +103,7 @@ async def test_redirect_credentials_cannot_cross_origin():
     hits = []
     async def redirect(request):
         hits.append('original')
-        return web.Response(status=307, headers={'Location':'http://127.0.0.1:1/restricted'})
+        return web.Response(status=307, headers={'Location':'http://outside.invalid/restricted'})
     app = web.Application()
     app.router.add_get('/', redirect)
     runner = web.AppRunner(app)
@@ -112,7 +114,8 @@ async def test_redirect_credentials_cannot_cross_origin():
     policy.authorization = auth('127.0.0.1')
     try:
         async with ClientSession() as session:
-            with pytest.raises(RuleForbidden, match='cross_origin'):
+            from qbh.scope import ScopeError
+            with pytest.raises(ScopeError):
                 await policy.get(session, f'http://127.0.0.1:{runner.addresses[0][1]}/',
                                  headers={'Authorization':'Bearer synthetic'}, allow_redirects=True)
         assert hits == ['original']
