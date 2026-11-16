@@ -25,18 +25,20 @@ def test_socket_policy_rejects_unauthorized_before_setup():
     not __import__("os").environ.get("XEZER_PRIVILEGED_TESTS"),
     reason="explicit privileged network fixture required",
 )
-async def test_actual_nmap_and_direct_socket_denial():
+@pytest.mark.parametrize("ipv6", [False, True])
+async def test_actual_nmap_and_direct_socket_denial(ipv6):
     # Target is synthetic and reachable only via the task's veth address.
-    policy = auth("198.19.0.0/16")
+    policy = auth("198.19.0.0/16", "fd42::/16")
     boundary = SocketNamespace(policy, ["198.19.0.1"], ports=[18080])
-    boundary.destinations = (boundary.gateway,)  # same explicit CIDR grant
+    gateway = boundary.gateway6 if ipv6 else boundary.gateway
+    boundary.destinations = (gateway,)  # same explicit CIDR grant
     with boundary:
-        listener = socket.socket()
-        listener.bind((boundary.gateway, 18080))
+        listener = socket.socket(socket.AF_INET6 if ipv6 else socket.AF_INET)
+        listener.bind((gateway, 18080))
         listener.listen()
         listener.setblocking(False)
-        denied = socket.socket()
-        denied.bind((boundary.gateway, 18081))
+        denied = socket.socket(socket.AF_INET6 if ipv6 else socket.AF_INET)
+        denied.bind((gateway, 18081))
         denied.listen()
         denied.setblocking(False)
         try:
@@ -44,6 +46,7 @@ async def test_actual_nmap_and_direct_socket_denial():
                 *boundary.wrap(
                     [
                         "/usr/bin/nmap",
+                        *(["-6"] if ipv6 else []),
                         "-n",
                         "-Pn",
                         "-sT",
@@ -53,7 +56,7 @@ async def test_actual_nmap_and_direct_socket_denial():
                         "0",
                         "--host-timeout",
                         "10s",
-                        boundary.gateway,
+                        gateway,
                     ]
                 ),
                 stdout=asyncio.subprocess.PIPE,
@@ -64,7 +67,14 @@ async def test_actual_nmap_and_direct_socket_denial():
             assert b"18080/tcp open" in output, output.decode()
             assert b"18081/tcp filtered" in output, output.decode()
             tamper = await asyncio.create_subprocess_exec(
-                *boundary.wrap(["/usr/sbin/iptables", "-P", "OUTPUT", "ACCEPT"]),
+                *boundary.wrap(
+                    [
+                        "/usr/sbin/ip6tables" if ipv6 else "/usr/sbin/iptables",
+                        "-P",
+                        "OUTPUT",
+                        "ACCEPT",
+                    ]
+                ),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )

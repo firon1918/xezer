@@ -8,6 +8,7 @@ HTTP path/method policies require HTTP mediation, not just this L3/L4 boundary.
 from __future__ import annotations
 
 import ipaddress
+import json
 import secrets
 import subprocess
 
@@ -37,13 +38,15 @@ class SocketNamespace:
         ):
             raise RuleForbidden("invalid_socket_ports")
         if len(self.ports) * len(self.destinations) > 1024:
-            raise RuleForbidden('socket_firewall_rule_budget_exceeded')
+            raise RuleForbidden("socket_firewall_rule_budget_exceeded")
         suffix = secrets.token_hex(4)
         self.name = "xez-" + suffix
         self.host_if, self.child_if = "xh" + suffix, "xc" + suffix
         number = secrets.randbelow(16384)
         network = ipaddress.ip_network(f"198.19.{number // 64}.{(number % 64) * 4}/30")
         self.gateway, self.address = str(network[1]), str(network[2])
+        self.gateway6 = f"fd42:{suffix[:4]}:{suffix[4:]}::1"
+        self.address6 = f"fd42:{suffix[:4]}:{suffix[4:]}::2"
         self.created = self.linked = False
         self.host_rules = []
 
@@ -56,9 +59,9 @@ class SocketNamespace:
     def inside(self, *args):
         return self.command("ip", "netns", "exec", self.name, *args)
 
-    def host_rule(self, table, chain, *rule):
-        self.command("iptables", "-w", "-t", table, "-I", chain, "1", *rule)
-        self.host_rules.append((table, chain, rule))
+    def host_rule(self, table, chain, *rule, family="iptables"):
+        self.command(family, "-w", "-t", table, "-I", chain, "1", *rule)
+        self.host_rules.append((family, table, chain, rule))
 
     def validate(self):
         self.auth.ensure_active()
@@ -91,8 +94,29 @@ class SocketNamespace:
             self.inside("ip", "addr", "add", self.address + "/30", "dev", self.child_if)
             self.inside("ip", "link", "set", self.child_if, "up")
             self.inside("ip", "link", "set", "lo", "up")
-            # Default deny precedes any scanner process. IPv6 has no egress
-            # route here and an explicit firewall deny as an independent gate.
+            ipv6 = any(":" in ip for ip in self.destinations)
+            if ipv6:
+                self.command(
+                    "ip",
+                    "-6",
+                    "addr",
+                    "add",
+                    self.gateway6 + "/64",
+                    "dev",
+                    self.host_if,
+                    "nodad",
+                )
+                self.inside(
+                    "ip",
+                    "-6",
+                    "addr",
+                    "add",
+                    self.address6 + "/64",
+                    "dev",
+                    self.child_if,
+                    "nodad",
+                )
+            # Default deny precedes any scanner process, for both address families.
             for family in ("iptables", "ip6tables"):
                 self.inside(family, "-P", "OUTPUT", "DROP")
                 self.inside(family, "-P", "FORWARD", "DROP")
@@ -108,14 +132,57 @@ class SocketNamespace:
                     "-j",
                     "ACCEPT",
                 )
+            if ipv6:
+                # Permanent neighbors remove the need to grant the scanner any
+                # ICMPv6 egress. MACs belong solely to our freshly created veth.
+                host_mac = json.loads(
+                    self.command("ip", "-j", "link", "show", self.host_if).stdout
+                )[0]["address"]
+                child_mac = json.loads(
+                    self.inside("ip", "-j", "link", "show", self.child_if).stdout
+                )[0]["address"]
+                self.inside(
+                    "ip",
+                    "-6",
+                    "neigh",
+                    "replace",
+                    self.gateway6,
+                    "lladdr",
+                    host_mac,
+                    "nud",
+                    "permanent",
+                    "dev",
+                    self.child_if,
+                )
+                self.command(
+                    "ip",
+                    "-6",
+                    "neigh",
+                    "replace",
+                    self.address6,
+                    "lladdr",
+                    child_mac,
+                    "nud",
+                    "permanent",
+                    "dev",
+                    self.host_if,
+                )
             for ip in self.destinations:
-                if ":" in ip:
-                    raise RuleForbidden("ipv6_socket_gateway_not_configured")
-                self.inside("ip", "route", "replace", ip + "/32", "via", self.gateway)
+                six = ":" in ip
+                family = "ip6tables" if six else "iptables"
+                self.inside(
+                    "ip",
+                    "-6" if six else "-4",
+                    "route",
+                    "replace",
+                    ip + ("/128" if six else "/32"),
+                    "via",
+                    self.gateway6 if six else self.gateway,
+                )
                 for port in self.ports:
                     for protocol in ("tcp", "udp"):
                         self.inside(
-                            "iptables",
+                            family,
                             "-A",
                             "OUTPUT",
                             "-d",
@@ -127,43 +194,57 @@ class SocketNamespace:
                             "-j",
                             "ACCEPT",
                         )
-            self.inside(
-                "iptables",
-                "-A",
-                "OUTPUT",
-                "-p",
-                "tcp",
-                "-j",
-                "REJECT",
-                "--reject-with",
-                "tcp-reset",
-            )
-            # Source check prevents packets with forged source addresses entering
-            # host routing. Rules match only this task's unique veth interface.
-            self.host_rule("filter", "FORWARD", "-i", self.host_if, "-j", "DROP")
-            self.host_rule(
-                "filter",
-                "FORWARD",
-                "-i",
-                self.host_if,
-                "-s",
-                self.address,
-                "-j",
-                "ACCEPT",
-            )
-            self.host_rule(
-                "filter",
-                "FORWARD",
-                "-o",
-                self.host_if,
-                "-m",
-                "conntrack",
-                "--ctstate",
-                "ESTABLISHED,RELATED",
-                "-j",
-                "ACCEPT",
-            )
-            self.host_rule("nat", "POSTROUTING", "-s", self.address, "-j", "MASQUERADE")
+            for family, address in [("iptables", self.address)] + (
+                [("ip6tables", self.address6)] if ipv6 else []
+            ):
+                self.inside(
+                    family,
+                    "-A",
+                    "OUTPUT",
+                    "-p",
+                    "tcp",
+                    "-j",
+                    "REJECT",
+                    "--reject-with",
+                    "tcp-reset",
+                )
+                # These rules apply only to this task's unique veth.
+                self.host_rule(
+                    "filter", "FORWARD", "-i", self.host_if, "-j", "DROP", family=family
+                )
+                self.host_rule(
+                    "filter",
+                    "FORWARD",
+                    "-i",
+                    self.host_if,
+                    "-s",
+                    address,
+                    "-j",
+                    "ACCEPT",
+                    family=family,
+                )
+                self.host_rule(
+                    "filter",
+                    "FORWARD",
+                    "-o",
+                    self.host_if,
+                    "-m",
+                    "conntrack",
+                    "--ctstate",
+                    "ESTABLISHED,RELATED",
+                    "-j",
+                    "ACCEPT",
+                    family=family,
+                )
+                self.host_rule(
+                    "nat",
+                    "POSTROUTING",
+                    "-s",
+                    address,
+                    "-j",
+                    "MASQUERADE",
+                    family=family,
+                )
             return self
         except BaseException:
             self.close()
@@ -229,9 +310,9 @@ class SocketNamespace:
 
     def close(self):
         errors = []
-        for table, chain, rule in reversed(self.host_rules):
+        for family, table, chain, rule in reversed(self.host_rules):
             try:
-                self.command("iptables", "-w", "-t", table, "-D", chain, *rule)
+                self.command(family, "-w", "-t", table, "-D", chain, *rule)
             except (OSError, subprocess.SubprocessError) as exc:
                 errors.append(exc)
         self.host_rules.clear()
