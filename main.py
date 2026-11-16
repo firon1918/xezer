@@ -97,7 +97,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--findings", action="store_true", help="scan tapıntılarının maskalanmış xülasəsini göstər")
     p.add_argument("--test-plan", action="store_true", help="test planları və ilkin şərtləri göstər")
     decisions = p.add_mutually_exclusive_group()
-    decisions.add_argument("--approve", nargs="?", const="*", metavar="PLAN_ID")
+    decisions.add_argument("--approve", metavar="PLAN_ID")
     decisions.add_argument("--reject", metavar="PLAN_ID")
     p.add_argument("--reason", default="cli_decision", help="plan qərarının səbəbi")
     return p
@@ -133,6 +133,9 @@ def _show_pending_followups(args: argparse.Namespace) -> int:
 
 
 async def run(args: argparse.Namespace) -> int:
+    if (args.approve or args.reject) and not args.test_plan:
+        print("[!] --approve/--reject requires --test-plan")
+        return EXIT_USAGE
     if getattr(args, "findings", False) or getattr(args, "compare_scans", None):
         import json
         from qbh import db
@@ -164,17 +167,18 @@ async def run(args: argparse.Namespace) -> int:
         conductor.ctx.scan_id = sid
         try:
             planner = BrainPlanner(conductor.ctx)
-            rows = planner.prepare_scan()
             choice = args.approve or args.reject
             if choice:
-                selected = [r['id'] for r in rows] if choice == '*' and args.approve else [choice]
+                selected = [choice]
                 for plan_id in selected:
                     store.decide(plan_id, sid, approve=bool(args.approve), reason=redact(args.reason))
                 if args.approve:
                     await conductor.ctx.initialize_auth()
-                planner.prepare_scan()
                 if args.approve:
-                    await planner.execute_ready()
+                    planner.prepare_scan()
+                    await planner.execute_ready(plan_ids=set(selected))
+            else:
+                planner.prepare_scan()
             print(json.dumps(store.list_plans(sid), ensure_ascii=False))
             return EXIT_OK
         except ValueError:

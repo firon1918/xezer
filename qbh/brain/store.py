@@ -67,11 +67,18 @@ def decide(plan_id, scan_id, *, approve, reason):
         row = get(plan_id, scan_id)
         if row is None:
             raise ValueError('plan_not_in_scan')
-        # This is a preference only. A subsequent planner pass rechecks prerequisites and RoE.
-        conn.execute('UPDATE test_plans SET user_decision=?,decision_reason=? WHERE id=? AND scan_id=?',
-                     ('approved' if approve else 'rejected', reason, plan_id, scan_id))
-        transition(plan_id, scan_id, (row['status'] if row['status'] in TERMINAL else 'pending') if approve else 'rejected',
-                   'user_approved_recheck_required' if approve else 'user_rejected')
+        # Compare-and-set prevents concurrent decisions and approval replay.
+        decision = 'approved' if approve else 'rejected'
+        status = 'pending' if approve else 'rejected'
+        cursor = conn.execute(
+            "UPDATE test_plans SET user_decision=?,decision_reason=?,status=?,reason=?,updated_at=? "
+            "WHERE id=? AND scan_id=? AND user_decision = 'automatic' "
+            "AND (status IN ('draft','pending','ready','deferred','skipped') "
+            "OR (? = 0 AND status = 'failed'))",
+            (decision, reason, status, 'user_' + decision, db._now(), plan_id, scan_id, int(approve)))
+        if cursor.rowcount != 1:
+            raise ValueError('plan_decision_conflict')
+        _event(conn, plan_id, status, 'user_' + decision, row['prerequisite_hash'])
 
 
 def list_plans(scan_id=None):

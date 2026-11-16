@@ -40,7 +40,13 @@ ProjectDiscovery `httpx` ilə Python `httpx` toqquşduqda `QBH_HTTPX_BIN` istifa
 .venv/bin/python main.py --list-imported --scan-id 1
 .venv/bin/python main.py --request-graph --scan-id 1
 .venv/bin/python main.py --test-plan --scan-id 1
-.venv/bin/python main.py --test-plan --scan-id 1 --approve
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:9a2d9cfc8596a1d87aea20e4add8723daacdc5982953f0a023d813f71fd45559 -->
+
+.venv/bin/python main.py --test-plan --scan-id 1 --approve PLAN_ID
+
+<!-- /coderabbit-ai-generated:v1 -->
 .venv/bin/python main.py --pending-followups --scan-id 1
 .venv/bin/python main.py --findings --scan-id 1 --severity high
 .venv/bin/python main.py --compare-scans 1 2

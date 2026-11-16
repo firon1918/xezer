@@ -156,7 +156,7 @@ class BrainPlanner:
         store.transition(plan_id, context.scan_id, result.status, result.reason, result_enc=encrypted, finding_id=finding_id)
         return {'status': result.status, 'finding_id': finding_id}
 
-    async def execute_ready(self, *, budget=None):
+    async def execute_ready(self, *, budget=None, plan_ids=None):
         maximum = int(self.runtime.cfg.chain.max_tasks) if budget is None else max(0, int(budget))
         cap = max(1, int(self.runtime.cfg.effective_concurrency))
         sched = Scheduler(workers=cap, global_limit=cap, per_host_limit=cap, ledger=self.ledger,
@@ -165,6 +165,8 @@ class BrainPlanner:
         dispatched = []
         async with sched:
             for plan_id, (context, plan) in self._prepared.items():
+                if plan_ids is not None and plan_id not in plan_ids:
+                    continue
                 row = store.get(plan_id, context.scan_id)
                 if row['status'] != 'ready':
                     continue
