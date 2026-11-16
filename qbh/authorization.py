@@ -243,6 +243,16 @@ class Authorization:
             raise RuleForbidden(
                 f"proqram qaydaları icazə vermir: {action!r}")
 
+    def require_operation(self) -> None:
+        """Apply the currently executing engine's rules to derived transports."""
+        action = self.current_operation()
+        if action is not None:
+            self.require(action)
+
+    def current_operation(self):
+        active = _operation.get()
+        return active[1] if active is not None and active[0] is self else None
+
     def require_command(self, command) -> None:
         """Apply tool RoE at the shared process boundary without inspecting secrets."""
         self.ensure_active()

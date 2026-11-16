@@ -20,7 +20,9 @@ import aiohttp
 from packaging.version import InvalidVersion, Version
 
 from .. import db
+from ..authorization import AuthorizationError
 from ..redact import redact
+from ..provider_policy import CVE_PROVIDERS, ProviderSession
 from ..results import EngineResult
 
 KEV_URL = ("https://www.cisa.gov/sites/default/files/feeds/"
@@ -67,6 +69,8 @@ async def _get_json(session, url, params=None, headers=None):
             if r.status == 200:
                 return await r.json(content_type=None)
             return {"__status": r.status}
+    except AuthorizationError:
+        raise
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
         return None
 
@@ -128,6 +132,8 @@ async def search_osv(session, product: str, version: str) -> list[str]:
             if r.status != 200:
                 return []
             data = await r.json(content_type=None)
+    except AuthorizationError:
+        raise
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
         return []
     return [v.get("id") for v in (data or {}).get("vulns", [])[:15] if v.get("id")]
@@ -197,7 +203,7 @@ async def run(ctx) -> EngineResult:
     nvd_key = getattr(ctx.cfg, "nvd_api_key", "") or None
     print("[═══ M6+ CVE İNTELLEKTİ (NVD/OSV/GitHub/KEV/EPSS) ═══]")
 
-    async with aiohttp.ClientSession() as session:
+    async with ProviderSession(ctx, CVE_PROVIDERS) as session:
         kev = await get_kev(session)
         if not kev:
             res.warn("CISA KEV məlumatı alına bilmədi (şəbəkə/timeout)")

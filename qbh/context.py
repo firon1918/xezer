@@ -225,6 +225,22 @@ class Context:
     def in_scope(self, host: str) -> bool:
         return self.cfg.in_scope(host)
 
+    async def request(self, session, method, url, **kwargs):
+        """Native fallback path still uses scan authorization and shared budgets."""
+        auth = self._auth()
+        policy = getattr(self.guardian, 'policy', None)
+        if policy is None:
+            from .http_policy import HttpPolicy
+            policy = getattr(self, '_fallback_policy', None)
+            if policy is None:
+                policy = HttpPolicy(auth.scope, rate=self.rate,
+                                    max_concurrency=int(self.cfg.effective_concurrency),
+                                    connect_timeout=self.limits.connect_timeout,
+                                    total_timeout=self.limits.total_timeout)
+                self._fallback_policy = policy
+        policy.authorization = auth
+        return await policy.request(session, method, url, **kwargs)
+
     def authorize_url(self, url: str) -> str:
         return self._auth().authorize_url(url)
 
