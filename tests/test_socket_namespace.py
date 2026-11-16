@@ -197,6 +197,7 @@ async def test_guard_dry_run_and_denied_target_never_resolve(monkeypatch):
     from qbh.egress import EgressController
     from qbh.adapters.base import run_process
 
+    monkeypatch.setattr("qbh.socket_tools.shutil.which", lambda _: None)
     policy = auth("allowed.example.test")
 
     def resolver(host):

@@ -54,14 +54,16 @@ async def run_socket_tool(
             stderr=b"egress: NSE/service probes require classified application mediation",
             blocked=True,
         )
-    executable = shutil.which(command[0])
-    if not executable:
-        return ProcResult(-1, missing=True)
     identities = list(dict.fromkeys([*(targets or ()), *command_targets(command)]))
     if not identities:
         return ProcResult(
             -1, stderr=b"egress: direct socket targets must be explicit", blocked=True
         )
+    for identity in identities:
+        auth.authorize_host(identity)
+    executable = shutil.which(command[0])
+    if not executable:
+        return ProcResult(-1, missing=True)
     bindings, port_map = {}, {}
     for identity in identities:
         host = auth.authorize_host(identity)
