@@ -82,7 +82,7 @@ class Context:
             self._egress = EgressController(
                 self._auth(),
                 resolved_store=self.resolved_ips,
-                audit=self.egress_audit)
+                audit=self.egress_audit, policy=getattr(self.guardian, 'policy', None))
         return self._egress
 
     @property

@@ -1,8 +1,7 @@
 """Guarded scan subprocess boundary.
 
-Target preflight records scope/DNS decisions. Children are then refused because
-optional sandboxing and target pinning cannot enforce HTTP path/method policy.
-No scan child may launch until a mandatory per-request mediation adapter exists.
+HTTP CLI adapters run inside mandatory namespace isolation and a request broker.
+Other children fail closed when no applicable mediation adapter is available.
 Standalone installer/version probes outside a scan are provisioning operations.
 """
 from __future__ import annotations
@@ -18,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
 from .adapters.base import (ProcResult, derive_targets, reset_process_guard,
-                            run_process, set_process_guard)
+                            set_process_guard)
 from .scope import ScopeError, extract_host, normalize_host
 
 DEFAULT_TTL = 300.0          # DNS nəticəsinin keçərlilik müddəti (saniyə)
@@ -90,13 +89,14 @@ class EgressController:
                  ttl: float = DEFAULT_TTL, clock: Callable[[], float] | None = None,
                  resolved_store: dict | None = None,
                  audit: list | None = None,
-                 sandbox: str | None = None):
+                 sandbox: str | None = None, policy=None):
         self.auth = authorization
         self._resolver = resolver or system_resolver
         self.ttl = float(ttl)
         self._clock = clock or time.monotonic
         self.resolved_store = resolved_store if resolved_store is not None else {}
         self.audit: list = audit if audit is not None else []
+        self.mediation_policy = policy
         self.sandbox = sandbox
         self._sandbox_warned = False
 
@@ -147,23 +147,26 @@ class EgressController:
         Qapını (scope + fail-closed DNS) tətbiq edir, mümkünsə firejail
         sandbox-u (DNS pin + IP allowlist) ilə işə salır və audit yazır.
         """
-        target_list = [t for t in targets if t]
-        blocked, _ = await self.prepare_process(cmd, target_list)
-        if blocked is not None:
-            return blocked
-        prefix, cleanup = await self._sandbox_prefix(target_list)
-        real_cmd = list(prefix) + list(cmd) if prefix else list(cmd)
+        return await self.run_mediated(cmd, targets=targets, stdin=stdin,
+                                       timeout=timeout, cancel_event=cancel_event)
+
+    async def run_mediated(self, cmd, *, targets=(), stdin=None, timeout=600, cancel_event=None):
+        from .authorization import RuleForbidden
+        from .mediation import PROXY_FLAGS, run_mediated
+        from pathlib import Path
         try:
-            with self.activate():
-                return await run_process(real_cmd, stdin=stdin, timeout=timeout,
-                                         cancel_event=cancel_event,
-                                         targets=target_list)
-        finally:
-            for path in cleanup:
-                try:
-                    os.unlink(path)
-                except OSError:
-                    pass
+            self.auth.require_command(cmd)
+        except RuleForbidden:
+            return ProcResult(-1, stderr=b'egress: tool forbidden by RoE', blocked=True)
+        if Path(cmd[0]).name not in PROXY_FLAGS:
+            blocked, _ = await self.prepare_process(cmd, targets)
+            return blocked
+        if self.mediation_policy is None:
+            from .mediation import BrokerPolicy
+            self.mediation_policy = BrokerPolicy(self.auth.scope, max_concurrency=4, max_retries=0)
+            self.mediation_policy.authorization = self.auth
+        # Per-request mediation, not a command-line target allowlist, is the boundary.
+        return await run_mediated(self, cmd, stdin=stdin, timeout=timeout, cancel_event=cancel_event)
 
     # ------------------------------------------------------ OS sandbox (opsional)
     def _sandbox_mode(self) -> str:

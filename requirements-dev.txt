@@ -16,3 +16,6 @@ cryptography>=42.0
 
 # Exercise the optional TLS transport against local fixtures in CI.
 curl_cffi>=0.13,<0.14
+
+# Mandatory HTTP mediation regression tests.
+-r requirements-mediation.txt

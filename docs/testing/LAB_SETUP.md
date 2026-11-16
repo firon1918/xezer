@@ -1,5 +1,7 @@
 <!-- coderabbit-ai-generated:v1 -->
 
+<!-- coderabbit-ai-generated-section:v1:ccc146ff0bd6b343eca99f5f91ec19e66293b3142e31bb31187217eada58e15a -->
+
 # Isolated vulnerability laboratory
 
 ## Juice Shop
@@ -20,3 +22,10 @@ Create an internal or host-only network with no bridged adapter, NAT route or sh
 
 ## Additional targets
 WebGoat, crAPI and DVWA were not installed; prioritize them only after Juice Shop and the central transport boundary are verified.
+
+## Verified namespace fallback
+
+The historical Docker cgroup failure above remains specific to Compose in this sandbox. Juice Shop now runs with isolated Unix ingress using the same pinned image; see [mediation checkpoint](../audit/MEDIATION_PROGRESS.md) for exact startup, limitations and observed tests.
+
+
+<!-- /coderabbit-ai-generated:v1 -->

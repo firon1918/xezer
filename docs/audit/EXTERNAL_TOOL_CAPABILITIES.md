@@ -1,5 +1,7 @@
 <!-- coderabbit-ai-generated:v1 -->
 
+<!-- coderabbit-ai-generated-section:v1:279922d8eb8ae1783ae8669ad9927a17d89b3be13758af11261cefcde81eefe4 -->
+
 # External integration audit
 
 Registry and engine-source inventory at this feature branch. Every row is an assessment of the integration boundary, not a claim that the third-party binary has been fully audited. No unsafe child was re-enabled. Target preflight cannot authorize generated paths/methods. Tools remain installed/configurable but guarded execution is blocked; do not count them as supported scanners.
@@ -37,3 +39,10 @@ Registry and engine-source inventory at this feature branch. Every row is an ass
 | interactsh-server | installer registry / indirect integration; runtime path not verified | DNS/raw sockets or multiple protocols | BLOCKED | Protocol-aware isolated adapter required; HTTP proxy cannot constrain raw sockets |
 
 A local `unshare --user --map-root-user --net true` capability check succeeded. That alone is not sufficient containment: host Unix sockets/files and helper subprocesses require filesystem/process isolation. No verified complete mediation wrapper was implemented in this turn. Proxy-based and tool-specific sandbox prototypes must demonstrate both permitted requests and denied hidden targets before support is claimed.
+
+## Subsequent mediation checkpoint
+
+The BLOCKED column above is the pre-change baseline, not the current certification matrix. curl and ffuf now have real allow/deny execution tests; sqlmap executes through mediation but missed the tested Juice Shop injection. nuclei, dalfox and feroxbuster have unverified proxy presets. Other rows still require restoration work. See [current evidence and remaining work](MEDIATION_PROGRESS.md). No version-only invocation counts as a scanner integration test.
+
+
+<!-- /coderabbit-ai-generated:v1 -->

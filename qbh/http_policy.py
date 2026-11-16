@@ -505,11 +505,40 @@ class HttpPolicy:
                 effective_headers = dict(session.headers)
                 effective_headers.update(headers or {})
                 from .authorization import RuleForbidden
-                if (getattr(session, '_default_proxy', None) or
-                        getattr(session, '_default_proxy_auth', None) or
-                        getattr(self.transport, 'proxy', None)):
-                    raise RuleForbidden('unmediated_proxy_forbidden')
+                call_kwargs = dict(call_kwargs)
+                proxy = call_kwargs.pop('proxy', None) or getattr(session, '_default_proxy', None) or getattr(self.transport, 'proxy', None)
+                proxy_auth = call_kwargs.pop('proxy_auth', None) or getattr(session, '_default_proxy_auth', None)
+                if proxy_auth and not proxy:
+                    raise RuleForbidden('proxy_auth_without_proxy')
                 validate_options(auth, url, effective_headers, call_kwargs)
+                if session.trust_env:
+                    raise RuleForbidden('ambient_proxy_settings_forbidden')
+                if proxy:
+                    from .proxy_transport import PinnedProxyConnector
+                    # Dedicated caller-owned pool; proxy identity is part of its binding.
+                    fingerprint = (auth, repr((auth.scope, auth.allowed_ports)), str(proxy), proxy_auth)
+                    connector = session.connector
+                    binding = getattr(connector, '_xezer_proxy_binding', None)
+                    if binding is not None and binding != fingerprint:
+                        raise RuleForbidden('proxy_or_policy_changed_requires_new_session')
+                    if binding is None:
+                        if not session.connector_owner:
+                            raise RuleForbidden('shared_connector_requires_policy_owned_session')
+                        replacement = PinnedProxyConnector(auth, proxy, proxy_auth,
+                            limit=connector.limit, limit_per_host=connector.limit_per_host)
+                        replacement._xezer_proxy_binding = fingerprint
+                        session._connector = replacement
+                        await connector.close()
+                    # aiohttp's built-in proxy path must not resolve the target again.
+                    async with session.request(method, url, headers=headers, allow_redirects=False,
+                            proxy='', proxy_auth=None,
+                            timeout=aiohttp.ClientTimeout(total=self.total_timeout, connect=self.connect_timeout),
+                            **call_kwargs) as response:
+                        text, truncated = await self._read_body(response)
+                        elapsed = time.monotonic() - started
+                        if self.metrics is not None:
+                            self.metrics.record_request(host, response.status, elapsed, transport=False)
+                        return response.status, dict(response.headers), text, truncated, elapsed
                 from urllib.parse import urlsplit
                 import ipaddress
                 try:
@@ -531,6 +560,8 @@ class HttpPolicy:
                 if session.trust_env:
                     from .authorization import RuleForbidden
                     raise RuleForbidden('ambient_proxy_settings_forbidden')
+                if getattr(session.connector, '_xezer_proxy_binding', None) is not None:
+                    raise RuleForbidden('proxy_session_requires_consistent_route')
                 if literal:
                     async with session.request(method, url, headers=headers, allow_redirects=False,
                                                timeout=aiohttp.ClientTimeout(total=self.total_timeout,
