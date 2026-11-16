@@ -1,6 +1,14 @@
 <!-- coderabbit-ai-generated:v1 -->
 
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:f131bfb1d5bf1c9fc7a9d2ddb8f88134b0b9fdfc778ebf0c9569748ce495e48a -->
+
 # Remediation checkpoint — incomplete assignment
+
+Latest changes and verification: [continuation report](CONTINUATION_REPORT.md). The historical checkpoint below is retained.
+
+<!-- /coderabbit-ai-generated:v1 -->
 
 ## A. Executive summary
 Initial architecture/boundary audit and first security repairs on baseline 27ddd80aee9a6d4332f3d1b2e4ab7a0dc1472916. This is a checkpoint, not completion of the master engineering assignment. P0 remains open; new vulnerability plugins and vulnerable labs have not been added.
