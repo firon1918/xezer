@@ -118,3 +118,14 @@ async def test_redirect_credentials_cannot_cross_origin():
         assert hits == ['original']
     finally:
         await runner.cleanup()
+
+
+async def test_session_default_proxy_is_not_a_bypass():
+    import aiohttp
+    from qbh.http_policy import HttpPolicy
+    policy = HttpPolicy(auth('127.0.0.1').scope)
+    async with aiohttp.ClientSession() as session:
+        # Also works on aiohttp releases without the constructor proxy argument.
+        session._default_proxy = 'http://127.0.0.1:1'
+        with pytest.raises(RuleForbidden, match='proxy'):
+            await policy.get(session, 'http://127.0.0.1:2/', retries=0)

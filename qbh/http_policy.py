@@ -490,6 +490,11 @@ class HttpPolicy:
                 auth.authorize_request(method, url)
                 effective_headers = dict(session.headers)
                 effective_headers.update(headers or {})
+                from .authorization import RuleForbidden
+                if (getattr(session, '_default_proxy', None) or
+                        getattr(session, '_default_proxy_auth', None) or
+                        getattr(self.transport, 'proxy', None)):
+                    raise RuleForbidden('unmediated_proxy_forbidden')
                 validate_options(auth, url, effective_headers, call_kwargs)
                 from urllib.parse import urlsplit
                 import ipaddress
