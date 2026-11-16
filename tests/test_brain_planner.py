@@ -178,3 +178,13 @@ def test_decision_replay_rejected(brain):
     store.decide(row['id'], runtime.scan_id, approve=True, reason='first')
     with pytest.raises(ValueError, match='plan_decision_conflict'):
         store.decide(row['id'], runtime.scan_id, approve=True, reason='replay')
+
+
+def test_execution_claim_is_single_use_and_version_bound(brain):
+    runtime, context, _ = brain
+    row = next(r for r in BrainPlanner(runtime).prepare(context) if r['status'] == 'ready')
+    assert not store.claim(row['id'], runtime.scan_id, 'stale-version')
+    assert store.claim(row['id'], runtime.scan_id, row['prerequisite_hash'])
+    assert not store.claim(row['id'], runtime.scan_id, row['prerequisite_hash'])
+    BrainPlanner(runtime).prepare(context)
+    assert store.get(row['id'], runtime.scan_id)['status'] == 'running'

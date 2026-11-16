@@ -20,6 +20,8 @@ def save(plan_id, context, plan, status, reason):
     conn = db.get_db()
     previous = get(plan_id, context.scan_id)
     if previous:
+        if previous['status'] == 'running':
+            return previous
         if previous['user_decision'] == 'rejected':
             status, reason = 'rejected', 'user_rejected'
         elif previous['prerequisite_hash'] == plan.prerequisite_hash and previous['status'] in TERMINAL:
@@ -31,11 +33,14 @@ def save(plan_id, context, plan, status, reason):
                      'VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET '
                      'prerequisite_hash=excluded.prerequisite_hash,status=excluded.status,reason=excluded.reason,'
                      'missing_prerequisites=excluded.missing_prerequisites,evidence_refs=excluded.evidence_refs,'
-                     'classifications=excluded.classifications,updated_at=excluded.updated_at',
+                     "classifications=excluded.classifications,updated_at=excluded.updated_at WHERE test_plans.status != 'running'",
                      (plan_id, context.scan_id, context.request_id, context.url_id, plan.vuln_class,
                       plan.prerequisite_hash, status, reason, canonical(plan.missing_prerequisites),
                       canonical(plan.evidence_refs), canonical([asdict(c) for c in context.classifications]),
                       db._now(), db._now()))
+        current = get(plan_id, context.scan_id)
+        if current['status'] == 'running':
+            return current
         if not previous or (previous['status'], previous['reason'], previous['prerequisite_hash']) != (status, reason, plan.prerequisite_hash):
             _event(conn, plan_id, status, reason, plan.prerequisite_hash)
     return get(plan_id, context.scan_id)
@@ -88,3 +93,18 @@ def list_plans(scan_id=None):
     rows = db.get_db().execute(sql + (' WHERE scan_id=?' if scan_id is not None else '') + ' ORDER BY created_at,id',
                               (scan_id,) if scan_id is not None else ())
     return [dict(row) for row in rows]
+
+
+def claim(plan_id, scan_id, prerequisite_hash):
+    """Atomically admit one execution of the prepared evidence version."""
+    conn = db.get_db()
+    with conn:
+        cursor = conn.execute(
+            "UPDATE test_plans SET status='running',reason='authorized_at_execution',updated_at=? "
+            "WHERE id=? AND scan_id=? AND status='ready' AND prerequisite_hash=? "
+            "AND user_decision != 'rejected'",
+            (db._now(), plan_id, scan_id, prerequisite_hash))
+        if cursor.rowcount != 1:
+            return False
+        _event(conn, plan_id, 'running', 'authorized_at_execution', prerequisite_hash)
+    return True

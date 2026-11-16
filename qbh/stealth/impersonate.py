@@ -141,14 +141,28 @@ class ImpersonatingTransport:
         if not self.available:
             raise RuntimeError(
                 "impersonation mövcud deyil (curl_cffi yoxdur və ya off)")
-        session = await self._ensure_session()
+        from curl_cffi.requests import AsyncSession
+        from http.cookies import SimpleCookie
+        from yarl import URL
+        cookie_jar = kwargs.pop("cookie_jar", None)
+        if cookie_jar is not None:
+            cookies = {k: v.value for k, v in cookie_jar.filter_cookies(URL(url)).items()}
+            cookies.update(kwargs.pop("cookies", {}) or {})
+            kwargs["cookies"] = cookies
         started = time.monotonic()
         try:  # pragma: no cover - curl_cffi tələb edir
-            resp = await session.request(
-                method, url, headers=headers, allow_redirects=allow_redirects,
-                proxy=proxy or self.proxy,
-                timeout=timeout or self.timeout, impersonate=self.target,
-                **kwargs)
+            # A request-local curl jar prevents ambient cookies crossing callers.
+            async with AsyncSession() as session:
+                resp = await session.request(
+                    method, url, headers=headers, allow_redirects=allow_redirects,
+                    proxy=proxy or self.proxy,
+                    timeout=timeout or self.timeout, impersonate=self.target,
+                    **kwargs)
+                if cookie_jar is not None:
+                    for header in resp.headers.get_list("set-cookie"):
+                        cookie = SimpleCookie()
+                        cookie.load(header)
+                        cookie_jar.update_cookies(cookie, URL(url))
         except Exception as exc:  # noqa: BLE001 - vahid xəta tipinə çevrilir
             # curl_cffi öz xəta tipini qaldırır; `HttpPolicy` isə yalnız
             # aiohttp/OS xətalarını tutur → burada normallaşdırılır ki,

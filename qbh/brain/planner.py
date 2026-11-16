@@ -125,7 +125,8 @@ class BrainPlanner:
         if not self.runtime.vault.available:
             store.transition(plan_id, context.scan_id, 'deferred', 'vault_unavailable_retryable')
             return {'status': 'deferred'}
-        store.transition(plan_id, context.scan_id, 'running', 'authorized_at_execution')
+        if not store.claim(plan_id, context.scan_id, plan.prerequisite_hash):
+            return {'status': 'not_claimed'}
         try:
             result = await plugin.execute_test(context, current)
         except asyncio.CancelledError:

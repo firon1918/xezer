@@ -356,6 +356,8 @@ class HttpPolicy:
         await self.acquire(host)
 
         max_tries = self.max_retries if retries is None else max(0, int(retries))
+        if method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+            max_tries = 0  # Delivery may have succeeded even when the response was lost.
         attempt = 0
         rotate_attempts = 0
         current = url
@@ -411,7 +413,8 @@ class HttpPolicy:
                             head.get("Retry-After") or head.get("retry-after")
                         ) if status == 429 else 0.0
                         await asyncio.sleep(min(max(ra, self.backoff_base), 5.0))
-                    if (rotate_attempts < self.max_rotate_attempts
+                    if (method.upper() in {"GET", "HEAD", "OPTIONS"}
+                            and rotate_attempts < self.max_rotate_attempts
                             and self.identity_provider is not None):
                         if self.identity_provider.rotate(
                                 host, reason=f"HTTP {status} ({strategy})"):
@@ -470,8 +473,8 @@ class HttpPolicy:
             if self._use_transport():
                 tr = await self.transport.request(
                     method, url, headers=headers, allow_redirects=False,
-                    proxy=call_kwargs.get("proxy"),
-                    timeout=self.total_timeout)
+                    cookie_jar=session.cookie_jar if isinstance(session, aiohttp.ClientSession) else None,
+                    timeout=self.total_timeout, **call_kwargs)
                 self.transport_requests += 1
                 elapsed = time.monotonic() - started
                 if self.metrics is not None:

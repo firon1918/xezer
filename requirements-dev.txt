@@ -13,3 +13,6 @@ ruff>=0.6
 # Runtime bunu tələb etmir: `qbh/vault.py` cryptography olmadıqda dürüst
 # şəkildə `available=False` olur (graceful degradation qorunur).
 cryptography>=42.0
+
+# Exercise the optional TLS transport against local fixtures in CI.
+curl_cffi>=0.13,<0.14
