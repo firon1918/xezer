@@ -463,6 +463,9 @@ class HttpPolicy:
         səviyyə — tutulur və gövdə oxunması daxil olmaqla bütün cəhdi əhatə edir.
         """
         async with self._slot(host):
+            authorization = getattr(self, "authorization", None)
+            if authorization is not None:
+                authorization.authorize_request(method, url)
             started = time.monotonic()
             if self._use_transport():
                 tr = await self.transport.request(

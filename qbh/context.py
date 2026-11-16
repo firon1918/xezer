@@ -53,7 +53,7 @@ class Context:
         if self.auth_state is None:
             from .brain.auth_state import AuthStateMachine
             self.auth_state = AuthStateMachine(self)
-        if offline:
+        if offline or getattr(self.args, "dry_run", False):
             for spec in self.cfg.auth_contexts:
                 self.auth_state.register_context(spec["name"], spec["role"], spec)
         else:
@@ -65,6 +65,9 @@ class Context:
             from .authorization import from_config
 
             self.authorization = from_config(self.cfg, self.scan_id)
+        self.authorization.dry_run = bool(getattr(self.args, "dry_run", False))
+        if getattr(self.args, "active_fuzz", None) is False:
+            self.authorization.profile_active_fuzz = False
         policy = getattr(self.guardian, "policy", None)
         if policy is not None:
             policy.authorization = self.authorization

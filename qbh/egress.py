@@ -193,6 +193,9 @@ class EgressController:
         sandbox-u (DNS pin + IP allowlist) ilə işə salır və audit yazır.
         """
         target_list = [t for t in targets if t]
+        blocked, _ = await self.prepare_process(cmd, target_list)
+        if blocked is not None:
+            return blocked
         prefix, cleanup = await self._sandbox_prefix(target_list)
         real_cmd = list(prefix) + list(cmd) if prefix else list(cmd)
         try:

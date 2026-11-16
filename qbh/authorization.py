@@ -18,6 +18,8 @@ from __future__ import annotations
 
 import asyncio
 import time
+import re
+import unicodedata
 from contextlib import contextmanager
 from contextvars import ContextVar
 from fnmatch import fnmatchcase
@@ -53,6 +55,46 @@ class ScanExpired(AuthorizationError):
     """Skan deadline-i keçib və ya ləğv edilib."""
 
 
+def _restriction_host(pattern):
+    # These are deny globs, not scope grants: preserve existing fnmatch syntax.
+    if any(char in pattern for char in "*?["):
+        try:
+            return pattern.lower().rstrip(".").encode("idna").decode("ascii")
+        except UnicodeError as exc:
+            raise RuleForbidden("invalid_restriction_host") from exc
+    return normalize_host(pattern)
+
+
+def policy_paths(url):
+    """Conservatively compare every decoding level and its normalized path.
+
+    Keep the transmitted URL unchanged; ambiguous nesting fails closed.
+    """
+    path = urlsplit(url).path or "/"
+    variants = set()
+    for _ in range(8):
+        path = unicodedata.normalize("NFC", path).replace("\\", "/")
+        if any(ord(c) < 32 or ord(c) == 127 for c in path):
+            raise RuleForbidden("invalid_path_control")
+        variants.add(path)
+        segments = []
+        for segment in path.split("/"):
+            if segment == "..":
+                if segments:
+                    segments.pop()
+            elif segment not in {"", "."}:
+                segments.append(segment)
+        normalized = "/" + "/".join(segments)
+        variants.add(normalized)
+        if path.endswith("/"):
+            variants.add(normalized.rstrip("/") + "/")
+        decoded = unquote(path, errors="strict")
+        if decoded == path:
+            return variants
+        path = decoded
+    raise RuleForbidden("excessive_path_encoding")
+
+
 @dataclass
 class Authorization:
     """Skan boyu YEGANƏ avtorizasiya qərar mərkəzi."""
@@ -67,6 +109,7 @@ class Authorization:
     profile_intrusive: bool = True
     #: Uyğunluq sahəsi: əlavə CLI təsdiqi tələb edilmir; YAML qadağası qüvvədədir.
     allow_state_changing: bool = True
+    dry_run: bool = False
     _cancelled: bool = False
     request_restrictions: list = field(default_factory=list)
 
@@ -82,8 +125,17 @@ class Authorization:
         if self.scope is None or self.scope.is_empty:
             raise NotAuthorized("scope konfiqurasiyası boşdur — icra dayandırılır")
         try:
+            if any(ord(c) < 33 or ord(c) == 127 for c in url):
+                raise ScopeError("invalid_url_control")
+            parsed = urlsplit(url)
+            if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+                raise ScopeError("invalid_http_url")
+            if parsed.username is not None or parsed.password is not None or "\\" in parsed.netloc:
+                raise ScopeError("ambiguous_url_authority")
+            if parsed.port is not None and not 1 <= parsed.port <= 65535:
+                raise ScopeError("invalid_port")
             host = normalize_host(extract_host(url))
-        except ScopeError as exc:
+        except ValueError as exc:
             raise NotAuthorized(f"etibarsız URL: {url!r} ({exc})") from exc
         try:
             self.scope.authorize(host)
@@ -94,8 +146,12 @@ class Authorization:
     def authorize_request(self, method, url, action=None, *, destructive=False):
         """One decision point for explicit request restrictions and lifecycle."""
         self.ensure_active()
+        if self.dry_run:
+            raise RuleForbidden("dry_run_network_forbidden")
         self.authorize_url(url)
         method = method.upper()
+        if not re.fullmatch(r"[A-Z!#$%&'*+.^_`|~-]+", method):
+            raise RuleForbidden("invalid_http_method")
         if destructive:
             raise RuleForbidden("destructive_operation")
         active = _operation.get()
@@ -107,11 +163,12 @@ class Authorization:
         if method not in {"GET", "HEAD", "OPTIONS"}:
             self.require("state_changing")
         host = normalize_host(extract_host(url))
-        path = urlsplit(url).path or "/"
-        # Check encoded and decoded paths so encoding cannot defeat an explicit deny.
-        paths = {path, unquote(path)}
+        try:
+            paths = policy_paths(url)
+        except UnicodeError as exc:
+            raise RuleForbidden("invalid_path_encoding") from exc
         for rule in self.request_restrictions:
-            if not any(fnmatchcase(host, h) for h in rule["hosts"]):
+            if not any(fnmatchcase(host, _restriction_host(h)) for h in rule["hosts"]):
                 continue
             if not any(fnmatchcase(p, pattern) for p in paths for pattern in rule["paths"]):
                 continue
@@ -184,6 +241,9 @@ class Authorization:
 
     def require_command(self, command) -> None:
         """Apply tool RoE at the shared process boundary without inspecting secrets."""
+        self.ensure_active()
+        if self.dry_run:
+            raise RuleForbidden("dry_run_process_forbidden")
         args = list(command)
         if not args:
             raise RuleForbidden("empty_command")
