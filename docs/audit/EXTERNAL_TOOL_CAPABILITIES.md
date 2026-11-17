@@ -1,5 +1,7 @@
 <!-- coderabbit-ai-generated:v1 -->
 
+<!-- coderabbit-ai-generated-section:v1:d6ff560f9d9fc10d1a7664b26687b7a44d77daa691b27af736e9ce97c9950cda -->
+
 <!-- coderabbit-ai-generated-section:v1:62894de9d67af329223a6bff92dc7f2bbadc060657fe1636d4d48fdc3e1d2e88 -->
 
 <!-- coderabbit-ai-generated-section:v1:7929bbfcfbb28d0c693c689ba27d0941086efaee1a9c6ce1185b03ba57080cd7 -->
@@ -15,7 +17,7 @@ Registry and engine-source inventory at this feature branch. Every row is an ass
 | Tool | Source references | Egress considerations | Current execution | Required secure adapter |
 |---|---|---|---|---|
 | subfinder | qbh/engines/deep_enum.py | DNS/raw sockets or multiple protocols | BLOCKED | Protocol-aware isolated adapter required; HTTP proxy cannot constrain raw sockets |
-| dnsx | qbh/engines/deep_enum.py | DNS/raw sockets or multiple protocols | BLOCKED | Protocol-aware isolated adapter required; HTTP proxy cannot constrain raw sockets |
+| dnsx | qbh/engines/deep_enum.py; qbh/dns_mediation.py | Private UDP/TCP DNS bridge to scoped Unix broker | PARTIAL: v1.3.1 real A/AAAA, denied-name and private-address tests pass | AXFR, ANY, iterative trace and complete DeepEnum orchestration remain unverified/unsupported paths |
 | httpx | qbh/engines/recon.py; mandatory HTTP broker and offline identity check | HTTP(S) target probing, optional DNS/protocol side channels | PARTIAL: v1.12.0 real HTTP, allow/deny, recon parser and SQLite persistence pass | Hostname/DNS, optional protocol modes and full recon stages still pending |
 | naabu | qbh/engines/recon.py; qbh/socket_tools.py via EgressController/run_process | TCP discovery with validated numeric target list | PARTIAL: v2.7.0 real IPv4/IPv6 JSON output verified | Exact recon top-ports pipeline, non-connect modes and resource limits still pending; v2.3.4 has a reproduced timeout-unit defect |
 | katana | qbh/engines/offensive.py, qbh/engines/param_enum.py, qbh/engines/recon.py | HTTP/HTTPS, redirects, generated requests; verify tool-specific side channels | PARTIAL: v1.8.0 real crawl, policy denial and ReconEngine database ingestion pass | Headless/browser, authenticated crawl and optional modes still require real tests |
@@ -83,6 +85,18 @@ Dalfox v2.13.0 executed a bounded custom-payload fixture through the real adapte
 A failing regression proved that the previous XSSEngine regular expression interpreted “not vulnerable” as a confirmed XSS finding. The old implementation also selected only reflected PoCs (`--only-poc r`) while claiming confirmation. It now collects JSONL R and V observations, preserves evidence, rejects malformed/foreign records and failed executions, and does not infer confirmation from prose. Dalfox's pinned implementation can emit V for a static DOM selector match, so that label alone is insufficient execution proof. Observations remain candidates until independent verification. This changes an incorrect confirmation behavior, while retaining detected signals and actual scanner execution. Production output includes requests/responses and worker concurrency follows the scan configuration.
 
 Reproduce selected real gates with XEZER_CLI_TESTS=1 and XEZER_TOOL_BIN containing the pinned binaries. Build commands verified here: GOBIN=<bin> GOMAXPROCS=2 go install github.com/projectdiscovery/katana/cmd/katana@v1.8.0 and github.com/hahwul/dalfox/v2@v2.13.0. Shared test command and exact observed results are recorded in the task validation record; headless XSS, full default Dalfox workflow, and unrelated scanner integrations remain outstanding.
+
+
+<!-- /coderabbit-ai-generated:v1 -->
+## DNSx controlled resolver integration
+
+EgressController routes actual DNSx executions into the existing filesystem/user/network namespace. The child has only its own loopback and a mounted Unix DNS broker socket. Explicit resolver arguments select a local UDP/TCP bridge; ignoring those arguments cannot create host network access. The parent parses bounded DNS messages, requires one IN question, authorizes its normalized name, checks lifecycle/dry-run and operation rules, and resolves it with dnspython using the deployment's configured resolver. A resolver is trusted control-plane infrastructure, not an assessment-scope grant. DNS-derived addresses never expand target scope. Subsequent HTTP/socket connections still need their own pinned transport authorization.
+
+The broker shares scan rate/concurrency state, caps concurrent handlers at16, accepts at most4096 request bytes, limits a process to1000 authorized questions, bounds resolver and exchange time, cancels handlers and removes sockets on teardown. Mixed A/AAAA address sets retain permitted addresses and filter private addresses lacking explicit grants. Explicit enterprise private-IP grants remain effective. This does not yet establish complete CPU/disk/output resource limiting for all scanners.
+
+Real DNSx1.3.1 executed through this adapter against a synthetic UDP resolver: A/AAAA output parsed correctly, foreign names never reached the upstream resolver, private addresses were filtered, and dry-run sent no DNS queries. Separate actual socket execution inside the same namespace could not contact the host resolver directly. Broker tests cover explicit private grants, cancellation, mixed-address filtering and CNAME records. No public assessment target was used. Version discovery passed in the offline namespace separately.
+
+Current limitations: single-query UDP/TCP lookup support does not implement AXFR/IXFR streaming or ANY; these return REFUSED explicitly. Iterative trace/direct authoritative-server modes cannot bypass the namespace and need a dedicated authorized adapter before being represented as working. Full DeepEnum source orchestration and DNSx wildcard/reverse/PTR modes remain unverified. No entire scanner integration was removed. Source files: qbh/dns_mediation.py, qbh/dns_child.py; real gate: XEZER_CLI_TESTS=1 XEZER_TOOL_BIN=<bin> python -m pytest tests/test_dns_mediation.py. Build pinned binary with GOBIN=<bin> GOMAXPROCS=2 go install github.com/projectdiscovery/dnsx/cmd/dnsx@v1.3.1.
 
 
 <!-- /coderabbit-ai-generated:v1 -->

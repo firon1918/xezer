@@ -161,6 +161,9 @@ class EgressController:
         from .offline_tools import is_offline_command, is_version_probe, run_offline
         if is_offline_command(cmd) or is_version_probe(cmd):
             return await run_offline(self, cmd, stdin=stdin, timeout=timeout, cancel_event=cancel_event)
+        if Path(cmd[0]).name == 'dnsx':
+            from .dns_mediation import run_dns_tool
+            return await run_dns_tool(self, cmd, stdin=stdin, timeout=timeout, cancel_event=cancel_event)
         if Path(cmd[0]).name == 'jsluice':
             from .offline_tools import run_remote_jsluice
             return await run_remote_jsluice(self, cmd, stdin=stdin, timeout=timeout, cancel_event=cancel_event)

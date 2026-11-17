@@ -366,7 +366,7 @@ class RequestBroker:
                 return
 
 
-def sandbox_command(command, directory, outputs=None, *, offline=False):
+def sandbox_command(command, directory, outputs=None, *, offline=False, dns=False):
     """Fresh filesystem, PID/IPC/user/network namespaces; no host sockets/home."""
     executable = shutil.which(command[0])
     if executable is None:
@@ -428,11 +428,9 @@ def sandbox_command(command, directory, outputs=None, *, offline=False):
             "--ro-bind",
             str(root / "socket"),
             "/broker/socket",
+            *([] if dns else ["--ro-bind", str(root / "ca.pem"), "/broker/ca.pem"]),
             "--ro-bind",
-            str(root / "ca.pem"),
-            "/broker/ca.pem",
-            "--ro-bind",
-            str(Path(__file__).with_name("mediation_child.py")),
+            str(Path(__file__).with_name("dns_child.py" if dns else "mediation_child.py")),
             "/runner.py",
         ]
     # Copy executable, never expose its entire installation/home directory.
