@@ -26,6 +26,7 @@ from .network_policy import validate_options
 
 # Reviewed HTTP-only entry points. Raw TCP/DNS/headless paths need other adapters.
 PROXY_FLAGS = {
+    "katana": ["-proxy", "{XEzer_PROXY}", "-duc"],
     "httpx": ["-http-proxy", "{XEzer_PROXY}", "-duc"],
     "curl": ["--proxy", "{XEzer_PROXY}", "--noproxy", ""],
     "ffuf": ["-x", "{XEzer_PROXY}"],

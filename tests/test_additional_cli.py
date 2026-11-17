@@ -201,3 +201,115 @@ async def test_version_probes_do_not_bypass_dry_run(monkeypatch):
     egress.auth.dry_run = True
     result = await egress.run([binary("httpx"), "-version"])
     assert result.blocked
+
+
+async def test_katana_crawls_real_graph_under_policy(monkeypatch, make_ctx, tmp_db):
+    from qbh.engines.recon import ReconEngine
+    from qbh.results import EngineResult
+    hits = []
+
+    async def page(request):
+        hits.append(request.path)
+        if request.path == '/':
+            return web.Response(text='<a href="/allowed">yes</a><a href="/restricted">no</a>'
+                                     '<a href="/jump">redirect</a>', content_type='text/html')
+        if request.path == '/jump':
+            raise web.HTTPFound(f'http://localhost:{request.url.port}/escape')
+        return web.Response(text='<html>discovered</html>', content_type='text/html')
+
+    app = web.Application()
+    app.router.add_get('/{path:.*}', page)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '127.0.0.1', 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    ctx = make_ctx()
+    ctx._auth().request_restrictions = controller().auth.request_restrictions
+    monkeypatch.setenv('PATH', os.environ['XEZER_TOOL_BIN'] + os.pathsep + os.environ['PATH'])
+    host_id = tmp_db.upsert_host('127.0.0.1', ctx.scan_id)
+    result = EngineResult(stage='recon')
+    try:
+        with ctx.egress.activate():
+            await ReconEngine(ctx)._crawl([dict(host='127.0.0.1', id=host_id,
+                                               url=f'http://127.0.0.1:{port}/')], result)
+        assert '/' in hits and '/allowed' in hits, (hits, ctx.egress_audit, result)
+        assert '/restricted' not in hits and '/escape' not in hits
+        rows = tmp_db.get_db().execute('SELECT url, source FROM urls').fetchall()
+        assert any(row[0].endswith('/allowed') and row[1] == 'katana' for row in rows)
+        assert not any('localhost' in row[0] for row in rows)
+        assert any(e['event'] == 'mediated_process' for e in ctx.egress_audit)
+    finally:
+        await runner.cleanup()
+
+
+@pytest.mark.parametrize('escaped', [False, True])
+async def test_real_dalfox_positive_and_negative_evidence(escaped, tmp_path, tmp_db, make_ctx):
+    import html
+    from qbh.engines.xss import XSSEngine
+    from qbh.results import EngineResult
+    hits = []
+    async def reflect(request):
+        value = request.query.get('q', '')
+        hits.append(value)
+        return web.Response(text='<html><body>' + (html.escape(value) if escaped else value)
+                            + '</body></html>', content_type='text/html')
+    app = web.Application()
+    app.router.add_get('/reflect', reflect)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '127.0.0.1', 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    payload = tmp_path / 'payload.txt'
+    payload.write_text('<svg id=dalfox onload=alert(1)>\n')
+    ctx = make_ctx()
+    url = f'http://127.0.0.1:{port}/reflect?q=baseline'
+    host_id = tmp_db.upsert_host('127.0.0.1', ctx.scan_id)
+    try:
+        proc = await ctx.egress.run([binary('dalfox'), 'url', url, '--no-spinner', '--silence',
+            '--format', 'jsonl', '--only-poc', 'r,v', '--skip-mining-all', '--skip-bav',
+            '--skip-headless', '--skip-grepping', '--only-custom-payload', '--custom-payload', str(payload),
+            '-p', 'q', '--worker', '2', '--timeout', '3', '--output-response'], timeout=60)
+        assert proc.ok, (proc.stderr.decode(), proc.stdout.decode())
+        assert any('dalfox' in value for value in hits), (hits, proc.stderr.decode())
+        res = EngineResult(stage='xss')
+        XSSEngine(ctx)._ingest_dalfox(proc.stdout, dict(host_id=host_id, url=url), res)
+        if escaped:
+            assert res.findings == 0, proc.stdout.decode()
+        else:
+            assert res.findings > 0, (proc.stdout.decode(), proc.stderr.decode())
+            rows = tmp_db.get_db().execute('SELECT status, source, evidence FROM findings').fetchall()
+            assert all(row['status'] == 'candidate' and row['source'] == 'dalfox' for row in rows)
+            assert any('dalfox' in row['evidence'] for row in rows)
+    finally:
+        await runner.cleanup()
+
+
+async def test_real_dalfox_denial_and_cli_failure():
+    hits = []
+    async def page(request):
+        hits.append(request.path)
+        return web.Response(text='unexpected')
+    app = web.Application()
+    app.router.add_get('/{path:.*}', page)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '127.0.0.1', 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    egress = controller()
+    try:
+        denied = await egress.run([binary('dalfox'), 'url', f'http://127.0.0.1:{port}/restricted?q=x',
+                                   '--silence', '--format', 'jsonl', '--skip-headless',
+                                   '--skip-mining-all', '--timeout', '1'], timeout=20)
+        assert not denied.timed_out
+        assert not hits
+        assert any(e['event'] == 'mediation_blocked' for e in egress.audit)
+        failed = await egress.run([binary('dalfox'), 'url', f'http://127.0.0.1:{port}/ok?q=x',
+                                   '--xezer-invalid-option'], timeout=20)
+        assert not failed.ok and failed.returncode != 0
+        assert b'unknown flag' in failed.stderr
+        assert not hits
+    finally:
+        await runner.cleanup()

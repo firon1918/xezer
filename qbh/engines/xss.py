@@ -3,14 +3,15 @@
 İki mərhələli təsdiq:
   1. **Refleksiya yoxlaması (daxili)** — parametrə unikal marker yeridilir və
      cavabda `<`/`>` kimi kontekst simvolları ilə geri qayıdıbsa `candidate`.
-  2. **Dalfox** — refleksiya olan hədəflər üzərində çalışır; yalnız "Verified"
-     / POC çıxışı ilə `confirmed`.
+  2. **Dalfox** — structured R/V observations retain tool evidence as candidates.
+     A V record can represent a DOM selector match, not JavaScript execution.
 
 Sübut: refleksiya edilmiş cavab fraqmenti (marker) və ya Dalfox POC.
 """
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 
 import aiohttp
@@ -21,8 +22,6 @@ from ..results import EngineResult
 from ..scope import ScopeError
 from .offensive import OffensiveEngine
 
-DALFOX_VERIFIED_RE = re.compile(
-    r"(\[V\]|Verified|POC:|vulnerable|XSS\s*found)", re.I)
 MARKER = "qbProbe7531"
 REFLECT_RE = re.compile(re.escape(MARKER))
 
@@ -110,31 +109,59 @@ class XSSEngine(OffensiveEngine):
     # ---------------------------------------------------------- dalfox
     async def _dalfox(self, row, res: EngineResult) -> None:
         cmd = ["dalfox", "url", row["url"], "--no-spinner", "--silence",
-               "--output", "/dev/stdout", "--only-poc", "r"]
-        # Faza 1.2: TƏK egress qapısı (scope + fail-closed DNS pinning).
+               "--format", "jsonl", "--only-poc", "r,v", "--output-request",
+               "--output-response", "--worker", str(self.cfg.effective_concurrency)]
         proc = await self.ctx.egress.run(cmd, targets=[row["url"]],
                                          timeout=self.timeout)
-        if proc.blocked:
-            res.warn("dalfox: egress qapısı hədəfi bloklandı")
+        if not proc.ok:
+            if proc.blocked:
+                reason = "authorization blocked execution"
+            elif proc.missing:
+                reason = "binary missing"
+            elif proc.timed_out:
+                reason = "timeout"
+            else:
+                reason = f"exit={proc.returncode}"
+            res.warn(f"dalfox: {reason}")
             return
-        if proc.missing:
-            res.warn("dalfox tapılmadı")
-            return
-        out = proc.stdout.decode(errors="ignore")
-        if not DALFOX_VERIFIED_RE.search(out):
-            return
-        poc = self._excerpt(out)
-        fid = self.record(
-            row["host_id"], "high", "XSS (Dalfox təsdiq)",
-            f"Dalfox {row['url']} üzərində XSS təsdiqlədi. POC çıxışı sübut "
-            f"kimi saxlanılır.",
-            evidence=poc, confidence=0.85, status="candidate", source="dalfox")
-        self.confirm(fid, "http_response", poc, confidence=0.9)
-        res.findings += 1
-        print(f"[🔴] {row['subdomain']}: XSS TƏSDİQLƏNDİ (Dalfox)")
+        self._ingest_dalfox(proc.stdout, row, res)
 
-    @staticmethod
-    def _excerpt(out: str, limit: int = 1200) -> str:
-        lines = [ln for ln in out.splitlines()
-                 if re.search(r"(POC|Verified|\[V\]|payload)", ln, re.I)]
-        return "\n".join(lines[:30])[:limit] or out[:limit]
+    def _ingest_dalfox(self, output, row, res):
+        """Keep structured tool evidence; prose and reflection are not execution.
+
+        Dalfox V can mean only an HTML element matched a selector, so even that
+        signal awaits independent validation rather than claiming executed JS.
+        """
+        seen = set()
+        for line in output.decode(errors="replace").splitlines():
+            try:
+                item = json.loads(line)
+            except (ValueError, RecursionError):
+                continue
+            if (not isinstance(item, dict) or not isinstance(item.get("type"), str)
+                    or item["type"] not in {"R", "V"}):
+                continue
+            if item.get("cwe") != "CWE-79" or not isinstance(item.get("data"), str):
+                continue
+            proof_url = item["data"]
+            try:
+                self.ctx._auth().authorize_url(proof_url)
+                proof, original = URL(proof_url), URL(row["url"])
+                if proof.origin() != original.origin():
+                    continue
+            except (ScopeError, ValueError):
+                continue
+            # Same evidence printed twice (e.g. a tool output-file option) is one
+            # observation, while distinct payloads retain their own evidence.
+            key = (proof_url, item.get("param"), item.get("type"))
+            if not all(isinstance(value, str) for value in key) or key in seen:
+                continue
+            seen.add(key)
+            evidence = json.dumps(item, ensure_ascii=False)
+            self.record(row["host_id"], "high", "XSS candidate (Dalfox)",
+                        f"Dalfox {item['type']} observation at {proof_url}. "
+                        "Tool evidence retained; JavaScript execution requires "
+                        "independent verification.",
+                        evidence=evidence, confidence=0.75 if item['type'] == 'V' else 0.5,
+                        status="candidate", source="dalfox")
+            res.findings += 1
