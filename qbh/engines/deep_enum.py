@@ -13,7 +13,9 @@ import aiohttp
 from .. import db
 from ..adapters.base import run_process
 from ..antiblock.ua_rotator import ua_for
+from ..authorization import AuthorizationError
 from ..redact import redact
+from ..provider_policy import PROVIDERS, ProviderSession
 from ..results import EngineResult
 from ..scope import ScopeError, normalize_host
 
@@ -118,11 +120,12 @@ class DeepEnumEngine:
         return subs
 
     async def _crtsh(self, domain: str) -> set[str]:
+        domain = self.ctx._auth().authorize_host(domain)
         subs: set[str] = set()
-        url = f"https://crt.sh/?q=%25.{domain}&output=json"
+        url = f"{PROVIDERS['crtsh'][1]}?q=%25.{domain}&output=json"
         try:
             timeout = aiohttp.ClientTimeout(total=60)
-            async with aiohttp.ClientSession() as s:
+            async with ProviderSession(self.ctx, ('crtsh',)) as s:
                 async with s.get(url, timeout=timeout,
                                  headers={"User-Agent": ua_for("crt.sh")}) as r:
                     if r.status == 200:
@@ -131,6 +134,8 @@ class DeepEnumEngine:
                                 name = name.strip().lstrip("*.")
                                 if name:
                                     subs.add(name)
+        except AuthorizationError:
+            raise
         except (aiohttp.ClientError, asyncio.TimeoutError, ValueError) as exc:
             raise RuntimeError(f"crt.sh xətası: {redact(str(exc))}") from exc
         print(f"[+] crt.sh: {len(subs)}")

@@ -132,15 +132,12 @@ class FingerprintEngine:
 
     # ---------------- HTTP ----------------
     async def _fetch(self, session, url: str):
-        """Guardian varsa ondan, yoxsa da birbaşa — hər zaman scope-daxili."""
+        """All paths use Guardian or the central Context request policy."""
         try:
             if self.guardian:
                 r = await self.guardian.get(session, url, allow_redirects=True)
-            else:  # pragma: no cover - guardian həmişə verilir
-                async with session.get(
-                        url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                    return resp.status, dict(resp.headers), \
-                        (await resp.text(errors="ignore"))[:400_000]
+            else:
+                r = await self.ctx.request(session, 'GET', url, allow_redirects=True)
             return r.status, r.headers, r.text[:400_000]
         except TargetBlocked:
             raise

@@ -246,6 +246,9 @@ class Conductor:
             allow_state_changing=bool(
                 getattr(args, "allow_state_changing", False)))
 
+        self.authorization.dry_run = bool(getattr(args, "dry_run", False))
+        if getattr(args, "active_fuzz", None) is False:
+            self.authorization.profile_active_fuzz = False
         self.policy.authorization = self.authorization
 
         self.scan_id: int | None = None

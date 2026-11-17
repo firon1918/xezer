@@ -22,7 +22,9 @@ import aiohttp
 
 from .. import db, urlintel
 from ..http_policy import TargetBlocked
+from ..authorization import AuthorizationError
 from ..redact import redact
+from ..provider_policy import ProviderSession
 from ..results import EngineResult
 from ..scope import ScopeError
 from .cve_intel import get_kev, rank_batch
@@ -69,6 +71,8 @@ async def osv_npm(session, package: str, version: str) -> list[dict]:
             if r.status != 200:
                 return []
             data = await r.json(content_type=None)
+    except AuthorizationError:
+        raise
     except (aiohttp.ClientError, asyncio.TimeoutError, ValueError):
         return []
     return list((data or {}).get("vulns", []) or [])
@@ -117,10 +121,11 @@ class LibraryCVEEngine:
 
             print(f"[═══ LIBRARY CVE (OSV/KEV/EPSS) ═══] {len(libs)} host"
                   f" (uyğun={plan.eligible}, xaric={plan.excluded})")
-            kev = await get_kev(session)
+        async with ProviderSession(self.ctx, ('kev', 'epss', 'osv')) as providers:
+            kev = await get_kev(providers)
             for (host_id, sub), found in libs.items():
                 for package, version in found.items():
-                    await self._match(session, host_id, sub, package, version,
+                    await self._match(providers, host_id, sub, package, version,
                                       kev, res)
         return res
 

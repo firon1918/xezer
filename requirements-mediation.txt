@@ -1,0 +1,4 @@
+# Optional mandatory CLI HTTP mediation: Linux + bubblewrap are required.
+-r requirements.txt
+h11>=0.16,<0.17
+cryptography>=42

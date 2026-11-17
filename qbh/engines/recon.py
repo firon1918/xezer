@@ -298,6 +298,10 @@ class ReconEngine:
             if r.missing:
                 return "missing"
             if r.timed_out:
+                res.warn(f"katana {h['host']}: timeout")
+                return None
+            if not r.ok:
+                res.warn(f"katana {h['host']}: execution failed (exit={r.returncode})")
                 return None
             n = 0
             for line in r.stdout.decode(errors="ignore").splitlines():

@@ -5,7 +5,7 @@ name: CI
 # CI HƏÇ VAXT xarici hədəfə şəbəkə trafiki göndərmir.
 on:
   push:
-    branches: ["main", "coderabbit/complete-phases-three-eight/b3af3e33"]
+    branches: ["main", "coderabbit/complete-phases-three-eight/b3af3e33", "feature/security-hardening-capability-expansion"]
   pull_request:
     branches: ["main"]
   workflow_dispatch:
@@ -43,6 +43,13 @@ jobs:
           cache: pip
       - name: Install dev dependencies
         run: pip install -r requirements-dev.txt
+      - name: Mandatory mediation sandbox prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap ffuf
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: Byte-compile (import/syntax gate)
         run: python -m compileall -q qbh main.py
       - name: Stable benchmark without overwriting baseline
