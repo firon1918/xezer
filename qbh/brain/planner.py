@@ -136,8 +136,9 @@ class BrainPlanner:
             # Raw exception strings may contain URLs, cookies, or provider credentials.
             store.transition(plan_id, context.scan_id, 'failed', 'strategy_error:' + type(exc).__name__)
             return {'status': 'failed'}
-        from .strategies.idor import has_confirmation
-        confirmed = plan.vuln_class == 'idor' and has_confirmation(result)
+        import importlib
+        gate = getattr(importlib.import_module(type(plugin).__module__), 'has_confirmation', None)
+        confirmed = result.status == 'confirmed' and callable(gate) and gate(result)
         if result.status == 'confirmed' and not confirmed:
             result.status, result.reason, result.confirmed = 'inconclusive', 'confirmation_evidence_incomplete', False
         encrypted = self.runtime.vault.encrypt(canonical(asdict(result)))

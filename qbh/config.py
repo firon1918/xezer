@@ -22,6 +22,7 @@ KNOWN_TOP_KEYS = {
     "program", "nvd_api_key", "scope", "limits", "proxy_file", "antiblock",
     "aggressiveness", "program_rules", "rotation", "block_strategy", "chain",
     "oob", "stealth", "vault", "vuln", "content", "api_enum", "auth_contexts", "auth_resource_policies", "request_restrictions",
+    "lfi_canary_file",
 }
 
 #: Faza 2 — stealth qatının strateji variantları.
@@ -240,6 +241,8 @@ class Config:
     network_allowed_ports: tuple = (80, 443)
     max_reconsideration_rounds: int = 3
     auth_resource_policies: list[dict] = field(default_factory=list)
+    #: Operator-designated synthetic canary outside the target's logical file root.
+    lfi_canary_file: str = ''
 
     # ---------------- yükləmə + validasiya ----------------
     @classmethod
@@ -327,6 +330,9 @@ class Config:
         rounds = raw.get("max_reconsideration_rounds", 3)
         if type(rounds) is not int or not 0 <= rounds <= 100:
             raise ConfigError("max_reconsideration_rounds must be an integer between 0 and 100")
+        canary = raw.get("lfi_canary_file", "")
+        if not isinstance(canary, str) or (canary and not canary.strip()):
+            raise ConfigError("lfi_canary_file must be a non-empty path string when set")
         return cls(
             max_reconsideration_rounds=rounds,
             path=path, program=program, nvd_api_key=nvd_key, scope=scope,
@@ -339,6 +345,7 @@ class Config:
             program_rules=program_rules, warnings=warnings, _raw=raw,
             network_allowed_ports=tuple(ports),
             request_restrictions=cls._validate_request_restrictions(raw.get("request_restrictions", []), warnings),
+            lfi_canary_file=canary,
         )
 
     @classmethod
