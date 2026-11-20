@@ -4,9 +4,9 @@
 
 **NOT RELEASE READY** until the remaining items below are closed. Status is
 evidence-based: every "verified" claim names the regression tests that prove
-it in this repository (full suite: 1407 passed, 7 skipped, real CLI gates
-enabled; the skips are the explicit privileged socket fixture and the
-curl_cffi presence check).
+it in this repository (full suite: 1434 passed, 7 skipped, real CLI gates
+enabled, coverage 83.22% against the 70% floor; the skips are the explicit
+privileged socket fixture and the curl_cffi presence check).
 
 ## Closed since the previous blocker report
 
@@ -46,20 +46,44 @@ curl_cffi presence check).
   double-submit headers, wrong-OTP rejection, stale-cookie fail-closed
   export, refresh-before-relogin on reload, and negative config validation;
   no tokens appear in the database dump.
+- **Active vulnerability plugins and OWASP detection benchmark.**
+  `qbh/brain/strategies/{sqli,ssti,lfi_path_traversal,xss}.py` add bounded
+  GET-only probes with per-class `has_confirmation` gates (paired controls,
+  distinct literals/products, repetition, negative controls); the planner
+  applies each plugin's own gate and downgrades forged confirmations.
+  `tests/test_injection_strategies.py` (25 tests) proves planted positives,
+  hardened negatives, error-text-only and flag-only rejection, dry-run and
+  authorization enforcement. `tests/benchmarks/owasp_detection.py` +
+  `tests/test_owasp_benchmark.py` measure the full brain lifecycle on
+  loopback fixtures: 6/6 expected detections, 0 hardened false positives.
+  XSS remains candidate-only pending independent browser execution evidence;
+  LFI requires an operator-designated synthetic canary (`lfi_canary_file`).
+- **Namespace lab fallback verified end-to-end.** The pinned Juice Shop
+  image (`bkimminich/juice-shop@sha256:2765a26d…`) was extracted with
+  `tests/labs/prepare-namespace.sh` and served by
+  `tests/labs/namespace_lab.py` (bubblewrap, empty network namespace,
+  Unix-socket ingress, loopback-only listener). `tests/labs/verify_juice_shop.py`
+  passed every check against it: readiness, native query-predicate bypass
+  (0 control rows vs 46 injected rows), native forbidden-path denial,
+  mediated curl allow/deny with `mediation_blocked` audit, and mediated
+  ffuf result-file integrity. The lab was stopped afterwards; no vulnerable
+  service remains running or publicly exposed. The lab shell scripts were
+  also repaired (CRLF→LF, `.gitattributes` keeps them LF) and the verify
+  script accepts `--port` so it never collides with unrelated local services.
 
 ## Remaining release blockers
 
-- No new active vulnerability plugins beyond the IDOR strategy and the
-  passive JWT implementation-weakness strategy; no comprehensive OWASP
-  detection benchmark with planted-vulnerability positive and hardened
-  negative fixtures yet.
-- Juice Shop compose/image preparation succeeded but container startup
-  failed due to sandbox cgroups; the namespace lab fallback exists
-  (`tests/labs/`) but is not yet verified end-to-end. VulnHub provisioning
-  and additional targets are untested. No vulnerable services remain
-  running or publicly exposed.
-- Full remote CI matrix results and performance measurements are
-  outstanding.
+- Docker Compose startup of the same image still fails in this sandbox due
+  to cgroups restrictions; the verified namespace fallback above is the
+  supported local lab path. VulnHub provisioning and additional targets
+  remain untested.
+- Full remote CI matrix results are outstanding: the local equivalents all
+  pass (ruff, compileall, benchmark stability with unchanged baseline,
+  pytest 1434 passed / 7 skipped at 83.22% coverage against the 70% floor,
+  report-mode and smoke gates), but pushing to the remote is currently
+  denied by the stored GitHub credential (403), so no remote run exists
+  for the latest commits. Local performance references: OWASP benchmark
+  planner time 1.465 s planted / 0.628 s hardened; full suite 272–304 s.
 
 ## Remaining audit items (non-blocking)
 

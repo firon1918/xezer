@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Deterministic, non-destructive XEzer checks against loopback Juice Shop only."""
 
+import argparse
 import asyncio
 import json
 from pathlib import Path
@@ -15,13 +16,13 @@ from qbh.http_policy import HttpPolicy
 from qbh.scope import ScopeEnforcer
 
 
-async def verify():
+async def verify(port=3000):
     scope = ScopeEnforcer.from_entries([{"in_scope": ["127.0.0.1"]}])
     auth = Authorization(scope=scope)
     policy = HttpPolicy(scope, rate=5, max_retries=0)
     policy.authorization = auth
     controller = EgressController(auth, policy=policy)
-    base = "http://127.0.0.1:3000"
+    base = f"http://127.0.0.1:{port}"
     async with aiohttp.ClientSession() as session:
         ready = await policy.get(session, base + "/")
         assert ready.status == 200
@@ -100,4 +101,7 @@ async def verify():
 
 
 if __name__ == "__main__":
-    print(json.dumps(asyncio.run(verify()), indent=2))
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--port", type=int, default=3000)
+    options = parser.parse_args()
+    print(json.dumps(asyncio.run(verify(options.port)), indent=2))

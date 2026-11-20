@@ -6,7 +6,8 @@
 
 ## v4.0.0 hazırlığı — buraxılmayıb
 
-- Offline HAR idxalı və RequestGraph; 15 sinifli Brain, iki plugin, davamlı plan audit-i.
+- Offline HAR idxalı və RequestGraph; 15 sinifli Brain, altı strategy plugin
+  (IDOR, JWT, SQLi, SSTI, LFI, XSS), davamlı plan audit-i.
 - DiffEngine, auth state machine, sübutla IDOR, bounded feedback, JS AST/maps/HAR əlaqələri.
 - Schema 12 additive migrations; əvvəlki scan/task/event/followup məlumatları qorunur.
 - `--findings` və `--compare-scans`; CLI-in mövcud rejimləri saxlanılıb.
@@ -19,7 +20,26 @@
 - Installer nonzero/timeout probe-nu verified saymır; x8 Cargo əmri ilə düzəldilib,
   help çıxışındakı IP ünvanı versiya kimi göstərilmir.
 - CI Python 3.10–3.14 və iki sabit benchmark keçidi ilə genişləndirilib.
-- External CLI daxili request policy enforcement açıq release maneəsidir;
+- Bütün scanner child TCP egress scoped namespace + broker relay ilə
+  mediatorsuz icra oluna bilməz; hər sorğu broker-də yenidən authorize
+  olunur (scope/path/method/rate/cooldown), non-HTTP fail-closed, DNS
+  bridged. Proxy-unaware raw-socket child regressiyası ilə qorunur.
+- TOTP (RFC 6238), refresh-token rotation və CSRF double-submit session
+  variantları fail-closed yoxlanıb; credential digest TOTP əlavəsindən
+  əvvəl hesablanır və refresh-də qorunur.
+- SQLi/SSTI/LFI brain strategiyaları əlavə olunub: yalnız paired control,
+  distinct literal/product, repetition və negative control ilə confirmed;
+  XSS candidate həddindədir (browser execution sübutu tələb olunur); LFI
+  operator-designated `lfi_canary_file` canary tələb edir. Planner hər
+  plugin-in öz `has_confirmation` gate-ni tətbiq edir və saxta confirmed-i
+  inconclusive-a endirir.
+- Loopback OWASP detection benchmark (planted vs hardened): 6/6 aşkarlama,
+  0 hardened false positive; `tests/test_owasp_benchmark.py` CI gate-dir.
+- Namespace Juice Shop lab end-to-end doğrulanıb (pinned image, bubblewrap,
+  Unix ingress, loopback-only); lab skriptləri CRLF→LF düzəldilib və
+  `.gitattributes` ilə LF saxlanılır; verify skripti `--port` qəbul edir.
+- Lokal qapılar: 1434 passed / 7 skipped, coverage 83.22% (floor 70%),
+  benchmark stability və smoke PASS. Remote CI hələ işləməyib (push 403);
   v4.0.0 tag-i və production-ready iddiası yoxdur.
 
 ## Tarixi qeydlər

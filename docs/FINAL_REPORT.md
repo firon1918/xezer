@@ -17,6 +17,60 @@ native HTTP sərhədi idarə etmir. Bu, Non-Negotiable §1.2/§1.7/§1.9 üçün
 release maneəsidir. Tag yalnız bütün qapılar keçəndə yaradıla bilər; **v4.0.0 yoxdur**.
 `main`-ə merge edilməyib. Phase 9 implementasiya edilməyib.
 
+## 20 noyabr 2026 davamı — cari vəziyyət
+
+Yuxarıdakı 16 noyabr bölməsi tarixi snapshot-dır. O vaxtdan bəri aşağıdakı
+maneələr sübutla bağlanıb və yeni lokal qapılar işlədilib:
+
+- **External CLI request enforcement (əvvəlki FAIL gate) bağlandı.** Bütün
+  child TCP egress scoped namespace + iptables REDIRECT ilə RequestBroker-ə
+  yönəldilir; hər sorğu broker-də yenidən authorize olunur (scope, path,
+  method, rate, cooldown), non-HTTP fail-closed, DNS bridged. Sübut:
+  `tests/test_proxy_mediation.py` (o cümlədən proxy-dən xəbərsiz raw-socket
+  child-ın məhdud path/method sorğuları broker-də sıfır target hit ilə
+  rədd edilir), `tests/test_dns_mediation.py`, `tests/test_socket_namespace.py`.
+  Commit `f1308c3`.
+- **Session transport variantları** (TOTP RFC 6238, refresh rotation, CSRF
+  double-submit) fail-closed yoxlanıb — `tests/test_auth_variants.py`,
+  commit `11c9b2e`.
+- **Aktiv vulnerability plugin-ləri və OWASP benchmark.** SQLi/SSTI/LFI
+  strategiyaları yalnız paired control + distinct literal/product +
+  repetition + negative control ilə confirmed olur; XSS candidate həddində
+  saxlanılır (browser execution sübutu tələb olunur); LFI operator canary
+  tələb edir. Planner hər plugin-in öz `has_confirmation` gate-ni tətbiq
+  edir. Loopback benchmark: **6/6 aşkarlama, 0 hardened false positive**
+  (`tests/benchmarks/owasp_detection.py`, CI gate
+  `tests/test_owasp_benchmark.py`). Commit `2682591`.
+- **Namespace lab end-to-end doğrulandı.** Pinned Juice Shop image
+  (`sha256:2765a26d…`) extract olunub, `tests/labs/namespace_lab.py` ilə
+  bubblewrap/empty-netns/Unix-ingress şəklində qaldırılıb və
+  `tests/labs/verify_juice_shop.py` bütün yoxlamaları keçib: readiness PASS,
+  native query-predicate bypass PASS (0 control / 46 injected rows),
+  native forbidden path PASS, mediated curl allow/deny PASS, mediated ffuf
+  result file PASS, `public_exposure: false`. Lab sonra dayandırılıb;
+  işlək zəif servis qalmayıb. Lab skriptlərindəki CRLF xətası düzəldilib
+  (`.gitattributes` ilə LF qorunur), verify skripti `--port` qəbul edir.
+
+Cari lokal qapılar (WSL Ubuntu, Python 3.14, real CLI alətləri ilə):
+
+| Yoxlama | Faktiki nəticə |
+|---|---|
+| `ruff check --select E4,E7,E9,F,B,W qbh tests main.py` | PASS, exit 0 |
+| `compileall -q qbh tests main.py` | PASS, exit 0 |
+| Full pytest (real CLI gates) | **1434 passed, 7 skipped**, 272.22 s, exit 0 |
+| `pytest --cov=qbh --cov-fail-under=70` | **83.22%**, 1434 passed, exit 0 |
+| Benchmark stability (`compare` + iki `bench_metrics`) | PASS, regressions=[], baseline dəyişməyib |
+| OWASP detection benchmark | **6/6**, 0 hardened FP; planted 4 confirmed + 3 candidate |
+| Report-mode smoke + `tests/test_smoke.py` | PASS, exit 0 |
+| Juice Shop namespace lab verify | bütün yoxlamalar PASS (yuxarıda) |
+
+Qalan maneələr: Docker Compose startup sandbox cgroups səbəbindən işləmir
+(verified namespace fallback mövcuddur); VulnHub əlavə hədəflər test
+edilməyib; **remote CI matrix hələ işləməyib** — push stored GitHub
+credential ilə 403 denied-dir, ona görə son commit-lər üçün remote run
+yoxdur. Bu səbəbdən v4.0.0 tag-i hələ yaradılmır və `main`-ə merge
+istifadəçiyə saxlanır. Ətraflı: `docs/development/KNOWN_LIMITATIONS.md`.
+
 ## Hər fazanın qəbul meyarları
 
 | Meyar | Vəziyyət | İşlədilmiş sübut |
