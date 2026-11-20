@@ -24,7 +24,10 @@ from .authorization import RuleForbidden
 from .http_policy import HttpPolicy
 from .network_policy import validate_options
 
-# Reviewed HTTP-only entry points. Raw TCP/DNS/headless paths need other adapters.
+# Reviewed HTTP entry points. Tools with an explicit proxy flag get it; the rest
+# rely on the namespace's transparent TCP interception + proxy environment, so
+# proxy-unaware clients are still mediated per request. CONNECT is never a
+# general TCP tunnel and raw non-HTTP protocols fail closed at the relay.
 PROXY_FLAGS = {
     "katana": ["-proxy", "{XEzer_PROXY}", "-duc"],
     "httpx": ["-http-proxy", "{XEzer_PROXY}", "-duc"],
@@ -39,7 +42,29 @@ PROXY_FLAGS = {
     "sqlmap": ["--proxy={XEzer_PROXY}", "--batch", "--disable-coloring"],
     "dalfox": ["--proxy", "{XEzer_PROXY}"],
     "feroxbuster": ["--proxy", "{XEzer_PROXY}"],
+    "gau": ["--proxy", "{XEzer_PROXY}"],
+    "x8": ["-x", "{XEzer_PROXY}"],
+    "gowitness": ["-p", "{XEzer_PROXY}"],
+    "arjun": [],
+    "schemathesis": [],
+    "ghauri": [],
+    "sstimap": [],
+    "git-dumper": [],
+    "kr": [],
+    "waymore": [],
+    "jwt_tool": [],
+    "subfinder": [],
+    "amass": [],
+    "bbot": [],
 }
+# Mixed-protocol scanners need both the DNS bridge and the HTTP relay.
+DNS_HTTP_TOOLS = {"subfinder", "amass", "bbot"}
+# These scanners query read-only intelligence providers in addition to targets;
+# the broker runs a second, separately-scoped provider realm for them.
+PROVIDER_TOOLS = {"gau", "waymore", "subfinder", "amass", "bbot"}
+# Flags whose value is a directory of artifacts (staged and copied back whole).
+DIR_OUTPUT_FLAGS = {"--screenshot-path"}
+FILE_OUTPUT_FLAGS = {"-o", "--output", "--db-path"}
 _raw = contextvars.ContextVar("broker_raw", default=b"")
 _response_headers = contextvars.ContextVar("broker_headers", default=())
 
@@ -75,7 +100,7 @@ def broker_policy(auth, policy=None):
 
 
 class RequestBroker:
-    def __init__(self, auth, directory, audit, policy=None):
+    def __init__(self, auth, directory, audit, policy=None, provider=None):
         # Imports are optional: callers fail closed when mediation extras are absent.
         import h11
         from cryptography import x509
@@ -87,6 +112,11 @@ class RequestBroker:
         self.hashes, self.serialization, self.rsa = hashes, serialization, rsa
         self.auth, self.directory, self.audit = auth, Path(directory), audit
         self.policy = broker_policy(auth, policy)
+        # A second, separately-scoped read-only realm for intelligence providers.
+        # It never inherits target private-IP grants, credentials or cookies.
+        self.provider = provider
+        self.provider_policy = broker_policy(provider, policy) if provider else None
+        self.provider_session = None
         self.key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         name = x509.Name(
             [x509.NameAttribute(NameOID.COMMON_NAME, "XEzer ephemeral mediation")]
@@ -136,6 +166,11 @@ class RequestBroker:
         self.session = aiohttp.ClientSession(
             cookie_jar=aiohttp.DummyCookieJar(), trust_env=False
         )
+        if self.provider is not None:
+            self.provider.ensure_active()
+            self.provider_session = aiohttp.ClientSession(
+                cookie_jar=aiohttp.DummyCookieJar(), trust_env=False
+            )
         self.server = await asyncio.start_unix_server(
             self.accept, str(self.directory / "socket"), limit=65536
         )
@@ -148,6 +183,16 @@ class RequestBroker:
             task.cancel()
         await asyncio.gather(*self.tasks, return_exceptions=True)
         await self.session.close()
+        if self.provider_session is not None:
+            await self.provider_session.close()
+
+    def _realm(self, url):
+        """Pick the provider realm for compiled-in provider hosts, else target."""
+        if self.provider is not None:
+            host = urlsplit(url).hostname
+            if host and self.provider.scope.is_authorized(host):
+                return self.provider, self.provider_policy, self.provider_session
+        return self.auth, self.policy, self.session
 
     def tls_context(self, hostname):
         if hostname in self.ssl_contexts:
@@ -245,8 +290,9 @@ class RequestBroker:
                         raise RuleForbidden("nested_connect")
                     authority = request.target.decode("ascii")
                     origin = "https://" + authority
-                    self.auth.authorize_url(origin)
-                    validate_options(self.auth, origin, {}, {})
+                    realm_auth, _, _ = self._realm(origin)
+                    realm_auth.authorize_url(origin)
+                    validate_options(realm_auth, origin, {}, {})
                     if conn.trailing_data[0] or reader._buffer:
                         raise RuleForbidden("pipelined_connect")
                     writer.write(b"HTTP/1.1 200 Connection established\r\n\r\n")
@@ -311,9 +357,10 @@ class RequestBroker:
                 self.requests += 1
                 if self.requests > 1000:
                     raise RuleForbidden("broker_request_budget")
+                _, realm_policy, realm_session = self._realm(url)
                 _raw.set(b"")
-                response = await self.policy.request(
-                    self.session,
+                response = await realm_policy.request(
+                    realm_session,
                     request.method.decode("ascii"),
                     url,
                     headers=headers,
@@ -366,11 +413,48 @@ class RequestBroker:
                 return
 
 
-def sandbox_command(command, directory, outputs=None, *, offline=False, dns=False):
-    """Fresh filesystem, PID/IPC/user/network namespaces; no host sockets/home."""
+def collect_outputs(outputs):
+    """Copy staged regular-file/directory artifacts back; never follow symlinks."""
+    for staged, destination in outputs:
+        if destination.is_symlink():
+            raise RuleForbidden("unsafe_output_destination")
+        if staged.is_dir():
+            destination.mkdir(parents=True, exist_ok=True)
+            total = 0
+            for item in sorted(staged.rglob("*")):
+                if item.is_symlink() or not item.is_file():
+                    continue
+                total += item.stat().st_size
+                if total > 64_000_000:
+                    raise RuleForbidden("output_budget_exceeded")
+                target = destination / item.relative_to(staged)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(item.read_bytes())
+        elif (
+            staged.is_file()
+            and not staged.is_symlink()
+            and staged.stat().st_size <= 32_000_000
+        ):
+            destination.write_bytes(staged.read_bytes())
+
+
+def sandbox_command(command, directory, outputs=None, *, mode="http", mounts=()):
+    """Fresh filesystem, PID/IPC/user/network namespaces; no host sockets/home.
+
+    mode: http | dns | dns+http | offline. Non-offline modes mount the trusted
+    scoped_child runner, which installs transparent TCP/DNS interception so even
+    proxy-unaware scanners egress only through the broker bridges.
+
+    mounts: iterable of (host_path, writable) bound at the same absolute path,
+    for tools that read/write a dedicated scratch directory (e.g. git-dumper).
+    Only the named directories cross the boundary — never the surrounding tree.
+    """
     executable = shutil.which(command[0])
     if executable is None:
         raise FileNotFoundError(command[0])
+    # Resolve symlinks so a real regular file is bound, never a link whose target
+    # lives outside the namespace (e.g. a tool symlinked into a shared bin dir).
+    executable = str(Path(executable).resolve())
     root = Path(directory)
     args = [
         "bwrap",
@@ -381,6 +465,8 @@ def sandbox_command(command, directory, outputs=None, *, offline=False, dns=Fals
         "0",
         "--cap-add",
         "CAP_NET_ADMIN",
+        "--cap-add",
+        "CAP_NET_RAW",
         "--cap-add",
         "CAP_SETPCAP",
         "--die-with-parent",
@@ -400,6 +486,10 @@ def sandbox_command(command, directory, outputs=None, *, offline=False, dns=Fals
         "/lib64",
         "--dev",
         "/dev",
+        # Namespace-private procfs: glibc expands $ORIGIN RUNPATH via
+        # /proc/self/exe, so native cores with bundled libs (semgrep) need it.
+        "--proc",
+        "/proc",
         "--tmpfs",
         "/tmp",
         "--dir",
@@ -421,22 +511,55 @@ def sandbox_command(command, directory, outputs=None, *, offline=False, dns=Fals
         "LANG",
         "C.UTF-8",
     ]
-    if not offline:
+    # Distro alternatives symlinks (e.g. iptables -> xtables-nft-multi) live here;
+    # without them the trusted runner cannot resolve the netfilter binaries.
+    if Path("/etc/alternatives").is_dir():
+        args += ["--ro-bind", "/etc/alternatives", "/etc/alternatives"]
+    if mode != "offline":
+        args += ["--dir", "/broker"]
+        if mode in {"http", "dns+http"}:
+            args += [
+                "--ro-bind", str(root / "socket"), "/broker/socket",
+                "--ro-bind", str(root / "ca.pem"), "/broker/ca.pem",
+            ]
+        if mode in {"dns", "dns+http"}:
+            args += ["--ro-bind", str(root / "dns"), "/broker/dns"]
         args += [
-            "--dir",
-            "/broker",
             "--ro-bind",
-            str(root / "socket"),
-            "/broker/socket",
-            *([] if dns else ["--ro-bind", str(root / "ca.pem"), "/broker/ca.pem"]),
-            "--ro-bind",
-            str(Path(__file__).with_name("dns_child.py" if dns else "mediation_child.py")),
+            str(Path(__file__).with_name("scoped_child.py")),
             "/runner.py",
         ]
-    # Copy executable, never expose its entire installation/home directory.
-    if not executable.startswith("/usr/"):
+    # Python tools installed in a dedicated venv: mount the whole environment
+    # read-only and launch through its interpreter (entry-point shebangs point at
+    # host paths that do not exist inside the namespace). An optional source tree
+    # <venv>/src/<tool> (git-cloned tools) is mounted alongside it.
+    interpreter = None
+    exe = Path(executable)
+    venv_root = exe.parent.parent
+    if (venv_root / "pyvenv.cfg").is_file():
+        args += ["--ro-bind", str(venv_root), "/opt/toolenv"]
+        # Console-script shebangs bake in the host venv path; tools that exec
+        # sibling scripts (semgrep -> pysemgrep) need that path to resolve too.
+        args += ["--ro-bind", str(venv_root), str(venv_root)]
+        source = venv_root / "src" / exe.name
+        if source.is_dir():
+            args += ["--ro-bind", str(source), f"/opt/tool-src/{exe.name}"]
+            args += ["--ro-bind", str(source), str(source)]
+        args += ["--setenv", "PATH", "/opt/toolenv/bin:/usr/bin:/bin"]
+        executable = f"/opt/toolenv/bin/{exe.name}"
+        interpreter = "/opt/toolenv/bin/python3"
+    elif not executable.startswith("/usr/"):
+        # Copy the executable, never expose its whole installation/home directory.
         args += ["--ro-bind", executable, "/tool"]
         executable = "/tool"
+    # Dedicated scratch directories a tool reads/writes (e.g. git-dumper output,
+    # semgrep input tree). Only the named paths cross the boundary, bound at the
+    # same absolute path so positional/flag arguments need no rewriting.
+    for path, writable in mounts:
+        resolved = Path(path).resolve()
+        if not resolved.is_dir():
+            raise FileNotFoundError(f"mount directory missing: {path}")
+        args += ["--bind" if writable else "--ro-bind", str(resolved), str(resolved)]
     # Explicit regular-file arguments only. Sockets, devices and symlink roots
     # cannot become ambient filesystem/network escape routes.
     rewritten = []
@@ -446,8 +569,15 @@ def sandbox_command(command, directory, outputs=None, *, offline=False, dns=Fals
     args += ["--bind", str(output_root), "/results"]
     previous = ""
     for arg in command[1:]:
-        if previous in {"-o", "--output"} and arg not in {"-", "/dev/stdout"}:
+        if previous in FILE_OUTPUT_FLAGS and arg not in {"-", "/dev/stdout"}:
             destination = output_root / str(len(outputs))
+            outputs.append((destination, Path(arg).absolute()))
+            rewritten.append("/results/" + destination.name)
+            previous = arg
+            continue
+        if previous in DIR_OUTPUT_FLAGS:
+            destination = output_root / f"dir{len(outputs)}"
+            destination.mkdir(exist_ok=True)
             outputs.append((destination, Path(arg).absolute()))
             rewritten.append("/results/" + destination.name)
             previous = arg
@@ -460,20 +590,19 @@ def sandbox_command(command, directory, outputs=None, *, offline=False, dns=Fals
             rewritten.append(destination)
         else:
             rewritten.append(arg)
-    if offline:
-        return args + ["--chdir", "/tmp", "--", executable, *rewritten]
+    tool_argv = [executable, *rewritten]
+    if interpreter is not None:
+        tool_argv = [interpreter, *tool_argv]
+    if mode == "offline":
+        return args + ["--chdir", "/tmp", "--", *tool_argv]
     return args + [
-        "--chdir",
-        "/tmp",
-        "/usr/bin/python3",
-        "/runner.py",
-        executable,
-        *rewritten,
+        "--chdir", "/tmp", "--",
+        "/usr/bin/python3", "/runner.py", mode, *tool_argv,
     ]
 
 
 async def run_mediated(
-    controller, command, *, stdin=None, timeout=600, cancel_event=None
+    controller, command, *, stdin=None, timeout=600, cancel_event=None, mounts=()
 ):
     from .adapters.base import run_process, set_process_guard, reset_process_guard
 
@@ -491,6 +620,17 @@ async def run_mediated(
             stderr=b"egress: mandatory bubblewrap isolation unavailable",
             blocked=True,
         )
+    mode = "dns+http" if name in DNS_HTTP_TOOLS else "http"
+    provider = None
+    if name in PROVIDER_TOOLS:
+        from .provider_policy import ProviderAuthorization, CLI_PROVIDER_HOSTS
+
+        provider = ProviderAuthorization(
+            controller.auth,
+            [("GET", f"https://{host}/") for host in CLI_PROVIDER_HOSTS],
+            controller.audit,
+            exact_paths=False,
+        )
     try:
         with tempfile.TemporaryDirectory(prefix="xezer-broker-") as directory:
             async with RequestBroker(
@@ -498,43 +638,70 @@ async def run_mediated(
                 directory,
                 controller.audit,
                 policy=controller.mediation_policy,
+                provider=provider,
             ) as broker:
-                outputs = []
-                args = sandbox_command(
-                    [*command, *PROXY_FLAGS[name]], directory, outputs
-                )
-                token = set_process_guard(None)
-                try:
-                    result = await run_process(
-                        args,
-                        stdin=stdin,
-                        timeout=timeout,
-                        cancel_event=cancel_event,
-                        env={},
+                dns_server = dns_broker = None
+                if mode == "dns+http":
+                    from .dns_mediation import DNSBroker
+
+                    dns_broker = DNSBroker(controller)
+                    dns_server = await asyncio.start_unix_server(
+                        dns_broker.handle, str(Path(directory) / "dns")
                     )
-                finally:
-                    reset_process_guard(token)
-                for staged, destination in outputs:
-                    if (
-                        staged.is_file()
-                        and not staged.is_symlink()
-                        and staged.stat().st_size <= 32_000_000
+                try:
+                    outputs = []
+                    args = sandbox_command(
+                        [*command, *PROXY_FLAGS[name]], directory, outputs,
+                        mode=mode, mounts=mounts,
+                    )
+                    token = set_process_guard(None)
+                    try:
+                        result = await run_process(
+                            args,
+                            stdin=stdin,
+                            timeout=timeout,
+                            cancel_event=cancel_event,
+                            env={},
+                        )
+                    finally:
+                        reset_process_guard(token)
+                    collect_outputs(outputs)
+                    # The trusted runner exits 125 with a marker when mandatory
+                    # isolation could not be established: never a silent success.
+                    if result.returncode == 125 and result.stderr.startswith(
+                        b"xezer-isolation:"
                     ):
-                        if destination.is_symlink():
-                            raise RuleForbidden("unsafe_output_destination")
-                        destination.write_bytes(staged.read_bytes())
-                controller.audit.append(
-                    {
-                        "event": "mediated_process",
-                        "tool": name,
-                        "requests": broker.requests,
-                        "returncode": result.returncode,
-                    }
-                )
-                return result
+                        controller.audit.append(
+                            {
+                                "event": "mediation_blocked",
+                                "reason": "isolation_setup_failed",
+                                "tool": name,
+                            }
+                        )
+                        return ProcResult(
+                            result.returncode, result.stdout, result.stderr, blocked=True
+                        )
+                    controller.audit.append(
+                        {
+                            "event": "mediated_process",
+                            "tool": name,
+                            "requests": broker.requests,
+                            "returncode": result.returncode,
+                        }
+                    )
+                    return result
+                finally:
+                    if dns_server is not None:
+                        dns_server.close()
+                        await dns_server.wait_closed()
+                        await dns_broker.close()
     except (ImportError, FileNotFoundError, OSError):
         return ProcResult(
             -1,
             stderr=b"egress: mandatory mediation dependencies or isolation unavailable",
             blocked=True,
+        )
+    except RuleForbidden:
+        return ProcResult(
+            -1, stderr=b"egress: mediation policy denied execution", blocked=True
         )

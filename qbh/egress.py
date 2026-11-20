@@ -141,16 +141,19 @@ class EgressController:
 
     async def run(self, cmd: list[str], *, targets: Iterable[str] = (),
                   stdin: bytes | None = None, timeout: float = 600,
-                  cancel_event: "asyncio.Event | None" = None) -> ProcResult:
+                  cancel_event: "asyncio.Event | None" = None,
+                  mounts: Iterable = ()) -> ProcResult:
         """Mühərriklər üçün TƏK icazəli alt-proses başlatma nöqtəsi.
 
         Qapını (scope + fail-closed DNS) tətbiq edir, mümkünsə firejail
         sandbox-u (DNS pin + IP allowlist) ilə işə salır və audit yazır.
         """
         return await self.run_mediated(cmd, targets=targets, stdin=stdin,
-                                       timeout=timeout, cancel_event=cancel_event)
+                                       timeout=timeout, cancel_event=cancel_event,
+                                       mounts=mounts)
 
-    async def run_mediated(self, cmd, *, targets=(), stdin=None, timeout=600, cancel_event=None):
+    async def run_mediated(self, cmd, *, targets=(), stdin=None, timeout=600,
+                           cancel_event=None, mounts=()):
         from .authorization import RuleForbidden
         from .mediation import PROXY_FLAGS, run_mediated
         from pathlib import Path
@@ -160,7 +163,8 @@ class EgressController:
             return ProcResult(-1, stderr=b'egress: tool forbidden by RoE', blocked=True)
         from .offline_tools import is_offline_command, is_version_probe, run_offline
         if is_offline_command(cmd) or is_version_probe(cmd):
-            return await run_offline(self, cmd, stdin=stdin, timeout=timeout, cancel_event=cancel_event)
+            return await run_offline(self, cmd, stdin=stdin, timeout=timeout,
+                                     cancel_event=cancel_event, mounts=mounts)
         if Path(cmd[0]).name == 'dnsx':
             from .dns_mediation import run_dns_tool
             return await run_dns_tool(self, cmd, stdin=stdin, timeout=timeout, cancel_event=cancel_event)
@@ -183,7 +187,8 @@ class EgressController:
             self.mediation_policy = BrokerPolicy(self.auth.scope, max_concurrency=4, max_retries=0)
             self.mediation_policy.authorization = self.auth
         # Per-request mediation, not a command-line target allowlist, is the boundary.
-        return await run_mediated(self, cmd, stdin=stdin, timeout=timeout, cancel_event=cancel_event)
+        return await run_mediated(self, cmd, stdin=stdin, timeout=timeout,
+                                  cancel_event=cancel_event, mounts=mounts)
 
     # ------------------------------------------------------ OS sandbox (opsional)
     def _sandbox_mode(self) -> str:

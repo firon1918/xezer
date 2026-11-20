@@ -1,15 +1,15 @@
 rules:
+  # ---- Python ----
   - id: qbh-dangerous-eval
     message: "Dangerous dynamic code execution (eval/exec) — potensial RCE mənbəyi"
     severity: WARNING
-    languages: [python, javascript, typescript, php]
+    languages: [python]
     patterns:
       - pattern-either:
           - pattern: eval(...)
           - pattern: exec(...)
           - pattern: os.system(...)
           - pattern: subprocess.$F(...)
-          - pattern: child_process.$F(...)
     metadata:
       category: security
       qbh_kind: rce
@@ -17,13 +17,24 @@ rules:
   - id: qbh-sql-concat
     message: "SQL sorğusunda sətir birləşməsi — SQL injection namizədi"
     severity: WARNING
-    languages: [python, javascript, typescript, php]
+    languages: [python]
     patterns:
       - pattern-either:
           - pattern: $CUR.execute($X + $Y)
           - pattern: $CUR.execute("..." + $X)
-          - pattern: $CUR.execute(f"...{$X}...")
           - pattern: $CUR.query("..." + $X)
+    metadata:
+      category: security
+      qbh_kind: sqli
+
+  - id: qbh-sql-concat-fstring
+    message: "SQL sorğusunda f-string birləşməsi — SQL injection namizədi"
+    severity: WARNING
+    languages: [python]
+    patterns:
+      - pattern-either:
+          - pattern: $CUR.execute(f"...{$X}...")
+          - pattern: $CUR.query(f"...{$X}...")
     metadata:
       category: security
       qbh_kind: sqli
@@ -31,15 +42,12 @@ rules:
   - id: qbh-ssrf-request-user-input
     message: "İstifadəçi girişi ilə HTTP sorğusu — SSRF namizədi"
     severity: WARNING
-    languages: [python, javascript, typescript, php]
+    languages: [python]
     patterns:
       - pattern-either:
           - pattern: requests.get($X)
           - pattern: requests.post($X)
           - pattern: urllib.request.urlopen($X)
-          - pattern: fetch($X)
-          - pattern: axios.get($X)
-          - pattern: file_get_contents($X)
     metadata:
       category: security
       qbh_kind: ssrf
@@ -47,13 +55,99 @@ rules:
   - id: qbh-hardcoded-secret
     message: "Kodda hardcoded secret/parol"
     severity: ERROR
-    languages: [python, javascript, typescript, php]
+    languages: [python]
     patterns:
-      - pattern-either:
-          - pattern: $K = "..."
+      - pattern: $K = "..."
       - metavariable-regex:
           metavariable: $K
           regex: (?i).*(secret|password|passwd|api_?key|token|private_?key).*
     metadata:
       category: security
       qbh_kind: secret
+
+  # ---- JavaScript ----
+  - id: qbh-dangerous-eval-js
+    message: "Dangerous dynamic code execution — potensial RCE mənbəyi"
+    severity: WARNING
+    languages: [javascript]
+    patterns:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: child_process.$F(...)
+    metadata:
+      category: security
+      qbh_kind: rce
+
+  - id: qbh-ssrf-request-user-input-js
+    message: "İstifadəçi girişi ilə HTTP sorğusu — SSRF namizədi"
+    severity: WARNING
+    languages: [javascript]
+    patterns:
+      - pattern-either:
+          - pattern: fetch($X)
+          - pattern: axios.get($X)
+    metadata:
+      category: security
+      qbh_kind: ssrf
+
+  - id: qbh-hardcoded-secret-js
+    message: "Kodda hardcoded secret/parol"
+    severity: ERROR
+    languages: [javascript]
+    patterns:
+      - pattern: $K = "..."
+      - metavariable-regex:
+          metavariable: $K
+          regex: (?i).*(secret|password|passwd|api_?key|token|private_?key).*
+    metadata:
+      category: security
+      qbh_kind: secret
+
+  # ---- TypeScript ----
+  - id: qbh-dangerous-eval-ts
+    message: "Dangerous dynamic code execution — potensial RCE mənbəyi"
+    severity: WARNING
+    languages: [typescript]
+    patterns:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: child_process.$F(...)
+    metadata:
+      category: security
+      qbh_kind: rce
+
+  - id: qbh-ssrf-request-user-input-ts
+    message: "İstifadəçi girişi ilə HTTP sorğusu — SSRF namizədi"
+    severity: WARNING
+    languages: [typescript]
+    patterns:
+      - pattern-either:
+          - pattern: fetch($X)
+          - pattern: axios.get($X)
+    metadata:
+      category: security
+      qbh_kind: ssrf
+
+  # ---- PHP ----
+  - id: qbh-dangerous-eval-php
+    message: "Dangerous dynamic code execution — potensial RCE mənbəyi"
+    severity: WARNING
+    languages: [php]
+    patterns:
+      - pattern-either:
+          - pattern: eval(...)
+          - pattern: exec(...)
+          - pattern: shell_exec(...)
+          - pattern: system(...)
+    metadata:
+      category: security
+      qbh_kind: rce
+
+  - id: qbh-ssrf-request-user-input-php
+    message: "İstifadəçi girişi ilə HTTP sorğusu — SSRF namizədi"
+    severity: WARNING
+    languages: [php]
+    pattern: file_get_contents($X)
+    metadata:
+      category: security
+      qbh_kind: ssrf

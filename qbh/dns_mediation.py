@@ -16,7 +16,7 @@ from .authorization import AuthorizationError, RuleForbidden
 from .network_policy import validate_ip
 from .http_policy import HttpPolicy
 from .adapters.base import ProcResult, run_process, set_process_guard, reset_process_guard
-from .mediation import sandbox_command
+from .mediation import sandbox_command, collect_outputs
 
 
 class DNSBroker:
@@ -127,22 +127,21 @@ async def run_dns_tool(controller, command, *, stdin=None, timeout=600, cancel_e
     broker = DNSBroker(controller)
     try:
         with tempfile.TemporaryDirectory(prefix='xezer-dns-') as directory:
-            server = await asyncio.start_unix_server(broker.handle, str(Path(directory) / 'socket'))
+            server = await asyncio.start_unix_server(broker.handle, str(Path(directory) / 'dns'))
             try:
                 outputs = []
                 args = sandbox_command([*command, '-r', '{XEzer_DNS}', '-duc'], directory,
-                                       outputs, dns=True)
+                                       outputs, mode='dns')
                 token = set_process_guard(None)
                 try:
                     result = await run_process(args, stdin=stdin, timeout=timeout,
                                                cancel_event=cancel_event, env={})
                 finally:
                     reset_process_guard(token)
-                for staged, destination in outputs:
-                    if staged.is_file() and not staged.is_symlink() and staged.stat().st_size <= 32_000_000:
-                        if destination.is_symlink():
-                            raise RuleForbidden('unsafe_output_destination')
-                        destination.write_bytes(staged.read_bytes())
+                collect_outputs(outputs)
+                if result.returncode == 125 and result.stderr.startswith(b'xezer-isolation:'):
+                    controller.audit.append({'event': 'dns_blocked', 'reason': 'isolation_setup_failed'})
+                    return ProcResult(result.returncode, result.stdout, result.stderr, blocked=True)
                 controller.audit.append({'event': 'dns_process', 'queries': broker.queries,
                                           'returncode': result.returncode})
                 return result

@@ -7,7 +7,7 @@ import aiohttp
 import asyncio
 import shutil
 
-from .authorization import AuthorizationError
+from .authorization import AuthorizationError, RuleForbidden
 
 from .adapters.base import (
     ProcResult,
@@ -15,9 +15,9 @@ from .adapters.base import (
     set_process_guard,
     reset_process_guard,
 )
-from .mediation import sandbox_command
+from .mediation import sandbox_command, collect_outputs
 
-OFFLINE_TOOLS = {"alterx", "jsluice"}
+OFFLINE_TOOLS = {"alterx", "jsluice", "semgrep", "jwt_tool"}
 
 
 def is_offline_command(command):
@@ -39,7 +39,7 @@ def is_version_probe(command):
 
 
 async def run_offline(
-    controller, command, *, stdin=None, timeout=600, cancel_event=None
+    controller, command, *, stdin=None, timeout=600, cancel_event=None, mounts=()
 ):
     controller.auth.require_command(command)
     if shutil.which("bwrap") is None:
@@ -51,7 +51,9 @@ async def run_offline(
     try:
         with tempfile.TemporaryDirectory(prefix="xezer-offline-") as directory:
             outputs = []
-            args = sandbox_command(command, directory, outputs, offline=True)
+            args = sandbox_command(
+                command, directory, outputs, mode="offline", mounts=mounts
+            )
             token = set_process_guard(None)
             try:
                 result = await run_process(
@@ -59,19 +61,12 @@ async def run_offline(
                 )
             finally:
                 reset_process_guard(token)
-            for staged, destination in outputs:
-                if (
-                    staged.is_file()
-                    and not staged.is_symlink()
-                    and staged.stat().st_size <= 32_000_000
-                ):
-                    if destination.is_symlink():
-                        return ProcResult(
-                            -1,
-                            stderr=b"offline: unsafe output destination",
-                            blocked=True,
-                        )
-                    destination.write_bytes(staged.read_bytes())
+            try:
+                collect_outputs(outputs)
+            except RuleForbidden:
+                return ProcResult(
+                    -1, stderr=b"offline: unsafe output destination", blocked=True
+                )
             controller.audit.append(
                 {
                     "event": "offline_process",

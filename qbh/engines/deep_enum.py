@@ -94,6 +94,8 @@ class DeepEnumEngine:
             ["subfinder", "-d", domain, "-all", "-silent"], timeout=600)
         if res.missing:
             raise RuntimeError("subfinder tapılmadı")
+        if res.blocked:
+            raise RuntimeError("subfinder egress/scope qapısı ilə bloklandı")
         if res.timed_out:
             raise RuntimeError("subfinder timeout")
         subs = {ln.strip() for ln in res.stdout.decode(errors="ignore").splitlines()
@@ -108,6 +110,8 @@ class DeepEnumEngine:
         if res.missing:
             print("[-] amass yoxdur — subfinder kifayət edir")
             return set()
+        if res.blocked:
+            raise RuntimeError("amass egress/scope qapısı ilə bloklandı")
         if res.timed_out:
             print("[-] amass timeout")
             return set()

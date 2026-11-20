@@ -272,6 +272,8 @@ class ReconEngine:
              "-json", "-no-color"], timeout=180)
         if r.missing:
             return None, False
+        if r.blocked:
+            raise RuntimeError("naabu egress/scope qapısı ilə bloklandı")
         ports: set[str] = set()
         for line in r.stdout.decode(errors="ignore").splitlines():
             try:
@@ -297,6 +299,9 @@ class ReconEngine:
                  "-H", f"User-Agent: {ua_for(h['host'])}"], timeout=300)
             if r.missing:
                 return "missing"
+            if r.blocked:
+                res.warn(f"{h['host']}: egress qapısı katana-nı bloklandı")
+                return None
             if r.timed_out:
                 res.warn(f"katana {h['host']}: timeout")
                 return None
@@ -332,6 +337,9 @@ class ReconEngine:
         r = await run_process(["gau", domain, "--threads", "5"], timeout=180)
         if r.missing:
             self._warn_missing(res, "gau", "arxiv toplama atlandı")
+            return
+        if r.blocked:
+            res.warn("egress qapısı gau-nu bloklandı — arxiv toplama atlandı")
             return
         if r.timed_out:
             return

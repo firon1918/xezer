@@ -180,6 +180,9 @@ class APIEnumEngine:
             # Zaman aşımı DEYİL — bunu `partial` kimi işarələmirik.
             res.warn("kiterunner (kr) tapılmadı")
             return
+        if proc.blocked:
+            res.warn(f"{host}: egress qapısı kiterunner-ı bloklandı — atlandı")
+            return
         if proc.timed_out:
             # Zaman aşımı → qismən nəticə: fallback tapıntıları saxlanılır,
             # lakin mərhələ tam uğurlu sayılmır.

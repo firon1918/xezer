@@ -313,3 +313,66 @@ async def test_real_dalfox_denial_and_cli_failure():
         assert not hits
     finally:
         await runner.cleanup()
+
+
+async def test_semgrep_scans_mounted_directory_offline(tmp_path):
+    """Real semgrep over a read-only directory mount; no network namespace bridge."""
+    from qbh.engines.sourcecode import SEMGREP_RULES
+
+    src = tmp_path / "src"
+    src.mkdir()
+    (src / "vuln.py").write_text("def run(user_input):\n    return eval(user_input)\n")
+    egress = controller()
+    result = await egress.run(
+        [binary("semgrep"), "--config", SEMGREP_RULES, "--json", "--quiet",
+         "--metrics=off", "--timeout", "120", str(src)],
+        timeout=240, mounts=[(str(src), False)])
+    assert result.ok, result.stderr.decode()
+    data = json.loads(result.stdout.decode() or "{}")
+    assert any(r["check_id"].endswith("qbh-dangerous-eval")
+               for r in data.get("results", [])), data
+    assert egress.audit[-1]["event"] == "offline_process"
+
+
+async def test_git_dumper_dumps_exposed_repo_into_mounted_directory(tmp_path):
+    """Real git-dumper reconstructs an exposed .git into a writable scratch mount."""
+    import subprocess
+
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    env = dict(os.environ, GIT_CONFIG_NOSYSTEM="1")
+    subprocess.run(["git", "init", "-q", "-b", "master", str(repo)], check=True, env=env)
+    (repo / "vuln.py").write_text("def run(x):\n    return eval(x)\n")
+    subprocess.run(["git", "-C", str(repo), "add", "."], check=True, env=env)
+    subprocess.run(["git", "-C", str(repo), "-c", "user.email=t@t.test",
+                    "-c", "user.name=t", "commit", "-qm", "init"], check=True, env=env)
+
+    async def serve(request):
+        rel = request.path.lstrip("/")
+        target = (repo / rel).resolve()
+        if not str(target).startswith(str(repo.resolve())) or not target.is_file():
+            return web.Response(status=404)
+        return web.Response(body=target.read_bytes())
+
+    app = web.Application()
+    app.router.add_get("/{path:.*}", serve)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    dump = tmp_path / "dump"
+    dump.mkdir()
+    egress = controller()
+    try:
+        result = await egress.run(
+            [binary("git-dumper"), f"http://127.0.0.1:{port}/.git/", str(dump)],
+            targets=[f"http://127.0.0.1:{port}/.git/"],
+            timeout=180, mounts=[(str(dump), True)])
+        assert result.ok, (result.returncode, result.stderr.decode())
+        restored = dump / "vuln.py"
+        assert restored.is_file(), list(dump.rglob("*"))
+        assert "eval(x)" in restored.read_text()
+        assert any(e["event"] == "mediated_process" for e in egress.audit)
+    finally:
+        await runner.cleanup()

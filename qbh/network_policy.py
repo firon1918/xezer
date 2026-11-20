@@ -38,8 +38,25 @@ def validate_options(auth, url, headers, options):
             auth.authorize_request(value, url)
         if key in {'x-original-url', 'x-rewrite-url'}:
             raise RuleForbidden('path_override_requires_effective_route_adapter')
-        if key == 'host' and value.lower().rstrip('.') != URL(url).authority.lower().rstrip('.'):
-            raise RuleForbidden('host_header_mismatch')
+        if key == 'host':
+            # Compare host AND effective port, normalizing default-port spelling
+            # (Host may omit :80/:443; yarl's authority may include it). IPv6-aware.
+            u = URL(url)
+            default_port = 443 if u.scheme == 'https' else 80
+            url_port = u.port or default_port
+            hv = value.strip()
+            if hv.startswith('['):
+                h, _, p = hv.partition(']')
+                h, p = h[1:], p.lstrip(':')
+            else:
+                h, _, p = hv.partition(':')
+            h = h.lower().rstrip('.')
+            try:
+                host_port = int(p) if p else default_port
+            except ValueError:
+                raise RuleForbidden('host_header_mismatch') from None
+            if h != u.host.lower().rstrip('.') or host_port != url_port:
+                raise RuleForbidden('host_header_mismatch')
     if options.get('proxy') or options.get('proxy_auth'):
         raise RuleForbidden('unmediated_proxy_forbidden')
     if options.get('ssl') is False or options.get('server_hostname'):

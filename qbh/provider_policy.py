@@ -28,6 +28,39 @@ PROVIDERS = {
 }
 CVE_PROVIDERS = ('kev', 'epss', 'osv', 'github_advisory', 'nvd')
 
+# Compiled-in read-only intelligence hosts used by passive-recon CLI scanners
+# (gau/waymore/subfinder/amass/bbot). The broker's provider realm authorizes these
+# hosts for safe methods only, in a scope separate from assessment targets, so
+# private-IP grants and target credentials never leak into provider traffic.
+# Sources outside this allowlist are denied by the broker (the scanner reports
+# them unavailable) — this is transparent network policy, not silent removal.
+CLI_PROVIDER_HOSTS = frozenset({
+    # URL archives / passive URL history (gau, waymore)
+    'web.archive.org', 'index.commoncrawl.org', 'otx.alienvault.com',
+    'urlscan.io', 'www.virustotal.com', 'virustotal.com',
+    # Certificate transparency / passive DNS / subdomain intelligence
+    'crt.sh', 'api.hackertarget.com', 'hackertarget.com', 'rapiddns.io',
+    'dns.bufferover.run', 'bufferover.run', 'api.threatminer.org',
+    'threatminer.org', 'www.threatcrowd.org', 'api.threatcrowd.org',
+    'threatcrowd.org', 'api.certspotter.com', 'certspotter.com',
+    'ct.cloudflare.com', 'dnsrepo.com', 'api.spyse.com', 'spyse.com',
+    'subdomain.center', 'riddler.io', 'fullhunt.io', 'api.fullhunt.io',
+    'search.censys.io', 'api.censys.io', 'censys.io', 'api.securitytrails.com',
+    'securitytrails.com', 'api.zoomeye.org', 'zoomeye.org', 'fofa.info',
+    'api.netlas.io', 'netlas.io', 'leakix.net', 'api.leakix.net',
+    'publicwww.com', 'api.recon.dev', 'recon.dev', 'recon.cloud',
+    'sitedossier.com', 'dnsdumpster.com', 'api.dnsdumpster.com',
+    'api.c99.nl', 'c99.nl', 'subdomainfinder.c99.nl',
+    # DNS-over-HTTPS resolvers used for resolution fallback
+    'dns.google', 'cloudflare-dns.com', 'mozilla.cloudflare-dns.com',
+    'family.cloudflare-dns.com', 'security.cloudflare-dns.com',
+    'one.one.one.one', 'dns.cloudflare.com', 'dns.quad9.net', 'dns9.quad9.net',
+    'dns10.quad9.net', 'dns11.quad9.net', 'dns.adguard.com',
+    'unfiltered.adguard.com', 'dns.alidns.com', 'doh.pub', 'dns.sb', 'doh.sb',
+    'doh.opendns.com', 'dns.switch.ch', 'dns.nextdns.io',
+    'doh.cleanbrowsing.org', 'dns.comodo.com', 'doh.dnslify.com',
+})
+
 
 def _endpoint(method, url):
     parsed = urlsplit(url)
@@ -36,7 +69,7 @@ def _endpoint(method, url):
 
 
 class ProviderAuthorization(Authorization):
-    def __init__(self, parent, endpoints, audit):
+    def __init__(self, parent, endpoints, audit, *, exact_paths=True):
         scope = ScopeEnforcer.from_entries([{'in_scope': [urlsplit(url).hostname
                                                         for _, url in endpoints]}])
         # A target deny is also a provider deny. Target allowlists are not copied.
@@ -45,6 +78,10 @@ class ProviderAuthorization(Authorization):
                                                         for m, u in endpoints}))
         self.parent, self.audit = parent, audit
         self.endpoints = frozenset(_endpoint(m, u) for m, u in endpoints)
+        # exact_paths=True: only the compiled-in (method, origin, path) tuples.
+        # exact_paths=False: any path on a compiled-in provider host, safe methods
+        # only — used by passive-recon scanners whose query paths vary per target.
+        self.exact_paths = exact_paths
 
     def ensure_active(self):
         self.parent.ensure_active()
@@ -63,8 +100,15 @@ class ProviderAuthorization(Authorization):
     def authorize_request(self, method, url, action=None, *, destructive=False):
         try:
             self.ensure_active()
-            if _endpoint(method, url) not in self.endpoints:
-                raise RuleForbidden('provider_endpoint_not_authorized')
+            if self.exact_paths:
+                if _endpoint(method, url) not in self.endpoints:
+                    raise RuleForbidden('provider_endpoint_not_authorized')
+            else:
+                if method.upper() not in {'GET', 'HEAD'}:
+                    raise RuleForbidden('provider_read_only_required')
+                host = urlsplit(url).hostname
+                if not host or not self.scope.is_authorized(host):
+                    raise RuleForbidden('provider_host_not_authorized')
             self.request_restrictions = self.parent.request_restrictions
             result = super().authorize_request(method, url, action or self.parent.current_operation(),
                                                destructive=destructive)

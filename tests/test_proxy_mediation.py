@@ -162,28 +162,154 @@ async def test_namespace_cannot_bypass_broker(tmp_path):
     from qbh.adapters.base import run_process
 
     p = policy("127.0.0.1")
-    sentinel = await asyncio.start_server(lambda r, w: w.close(), "127.0.0.1", 0)
-    port = sentinel.sockets[0].getsockname()[1]
+    sentinel_hits = []
+
+    async def sentinel(reader, writer):
+        sentinel_hits.append(1)
+        writer.close()
+
+    server = await asyncio.start_server(sentinel, "127.0.0.1", 0)
+    port = server.sockets[0].getsockname()[1]
+    # Transparent interception redirects ALL child TCP egress into the broker
+    # relay, so a connect() to an unauthorized service is accepted by the relay
+    # (not refused) but the service itself is never reached directly, and any
+    # out-of-scope HTTP request is denied with no response. Both are asserted.
     code = f"""import os,socket
 assert not os.path.exists('/run/docker.sock')
-assert not os.path.exists('/proc/1/root')
+# Private procfs: PID 1 is the sandbox runner, so /proc/1/root exists but must
+# resolve to the sandbox root itself — never the host filesystem.
+root = os.path.realpath('/proc/1/root')
+assert os.path.exists(root + '/runner.py'), root
+assert not os.path.exists(root + '/home/firon'), root
+assert not os.path.exists(root + '/mnt/c'), root
 assert not os.path.exists('/home/vercel-sandbox')
-s=socket.socket();s.settimeout(1)
-assert s.connect_ex(('127.0.0.1',{port})) != 0
+s=socket.socket();s.settimeout(2)
+s.connect_ex(('127.0.0.1',{port}))
 s.close()
-s=socket.socket();s.settimeout(1)
-assert s.connect_ex(('192.0.2.1',80)) != 0
-print('isolated')"""
+s=socket.socket();s.settimeout(3)
+data=b''
+try:
+    s.connect(('192.0.2.1',80))
+    s.sendall(b'GET / HTTP/1.1\\r\\nHost: 192.0.2.1\\r\\nConnection: close\\r\\n\\r\\n')
+    while True:
+        chunk=s.recv(65536)
+        if not chunk: break
+        data+=chunk
+except OSError:
+    pass
+s.close()
+print('isolated' if not data else 'BYPASS:'+repr(data))"""
     try:
         async with RequestBroker(p.authorization, tmp_path, []):
             result = await run_process(
-                sandbox_command(["/usr/bin/python3", "-c", code], tmp_path), timeout=10
+                sandbox_command(["/usr/bin/python3", "-c", code], tmp_path), timeout=15
             )
             assert result.ok, result.stderr.decode()
             assert result.stdout.strip() == b"isolated"
+        # The unauthorized loopback service received no direct connection: the
+        # child's traffic was intercepted by the relay, never bypassing it.
+        assert sentinel_hits == []
     finally:
-        sentinel.close()
-        await sentinel.wait_closed()
+        server.close()
+        await server.wait_closed()
+
+
+async def test_origin_form_post_body_is_preserved_through_relay(tmp_path):
+    """Proxy-unaware clients send origin-form requests; the relay rewrite must
+    not alter the framed body (no extra header terminator before the body)."""
+    from qbh.mediation import RequestBroker, sandbox_command
+    from qbh.adapters.base import run_process
+
+    received = []
+
+    async def target(request):
+        received.append((request.path, await request.read()))
+        return web.Response(text="ok")
+
+    app = web.Application()
+    app.router.add_post("/{path:.*}", target)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    p = policy("127.0.0.1")
+    code = f"""import socket
+body=b'username=alice&password=synthetic-secret'
+s=socket.create_connection(('127.0.0.1',{port}),timeout=5)
+s.sendall(b'POST /login HTTP/1.1\\r\\nHost: 127.0.0.1:{port}\\r\\nContent-Type: application/x-www-form-urlencoded\\r\\nContent-Length: '+str(len(body)).encode()+b'\\r\\n\\r\\n'+body)
+data=b''
+while True:
+    chunk=s.recv(65536)
+    if not chunk: break
+    data+=chunk
+assert b'200' in data.split(b'\\r\\n')[0], data
+print('done')"""
+    try:
+        async with RequestBroker(p.authorization, tmp_path, []):
+            result = await run_process(
+                sandbox_command(["/usr/bin/python3", "-c", code], tmp_path), timeout=15
+            )
+            assert result.ok, result.stderr.decode()
+        assert received == [("/login", b"username=alice&password=synthetic-secret")]
+    finally:
+        await runner.cleanup()
+
+
+async def test_proxy_unaware_child_path_and_method_restrictions(tmp_path):
+    """Raw-socket children ignore proxy env; transparent interception must still
+    enforce configured path and method restrictions at the broker."""
+    from qbh.mediation import RequestBroker, sandbox_command
+    from qbh.adapters.base import run_process
+
+    hits = []
+
+    async def target(request):
+        hits.append((request.method, request.path))
+        return web.Response(text="ok")
+
+    app = web.Application()
+    app.router.add_route("*", "/{path:.*}", target)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, "127.0.0.1", 0)
+    await site.start()
+    port = site._server.sockets[0].getsockname()[1]
+    p = policy("127.0.0.1")
+    p.authorization.request_restrictions = [
+        {"hosts": ["*"], "paths": ["/restricted"], "methods": ["*"], "forbidden": ["*"]},
+        {"hosts": ["*"], "paths": ["/ok"], "methods": ["DELETE"], "forbidden": ["*"]},
+    ]
+    code = f"""import socket
+
+def raw(method, path):
+    s = socket.create_connection(('127.0.0.1', {port}), timeout=5)
+    s.sendall((method + ' ' + path + ' HTTP/1.1\\r\\nHost: 127.0.0.1:{port}\\r\\nConnection: close\\r\\n\\r\\n').encode())
+    data = b''
+    while True:
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        data += chunk
+    s.close()
+    return data
+
+assert b'200' in raw('GET', '/ok').split(b'\\r\\n')[0]
+# Denial is a closed exchange, never a synthetic HTTP response from the target.
+assert raw('GET', '/restricted') == b''
+assert raw('DELETE', '/ok') == b''
+print('enforced')"""
+    try:
+        async with RequestBroker(p.authorization, tmp_path, []) as broker:
+            result = await run_process(
+                sandbox_command(["/usr/bin/python3", "-c", code], tmp_path), timeout=15
+            )
+            assert result.ok, result.stderr.decode()
+            assert result.stdout.strip() == b"enforced"
+        assert hits == [("GET", "/ok")]
+        assert sum(e.get("event") == "mediation_blocked" for e in broker.audit) >= 2
+    finally:
+        await runner.cleanup()
 
 
 async def test_https_cli_is_decrypted_and_reauthorized(tmp_path, monkeypatch):

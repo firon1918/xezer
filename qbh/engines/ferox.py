@@ -110,6 +110,9 @@ class FeroxEngine:
             if proc.missing:
                 res.warn("feroxbuster tapılmadı — atlandı")
                 return
+            if proc.blocked:
+                res.warn(f"{host}: egress qapısı feroxbuster-ı bloklandı — atlandı")
+                return
             if proc.timed_out:
                 res.warn(f"ferox {host}: timeout ({TIMEOUT}s)")
             self._parse(host_row, out_file, res)
