@@ -4,7 +4,7 @@
 
 **NOT RELEASE READY** until the remaining items below are closed. Status is
 evidence-based: every "verified" claim names the regression tests that prove
-it in this repository (full suite: 1434 passed, 7 skipped, real CLI gates
+it in this repository (full suite: 1436 passed, 7 skipped, real CLI gates
 enabled, coverage 83.22% against the 70% floor; the skips are the explicit
 privileged socket fixture and the curl_cffi presence check).
 
@@ -79,11 +79,11 @@ privileged socket fixture and the curl_cffi presence check).
   remain untested.
 - Full remote CI matrix results are outstanding: the local equivalents all
   pass (ruff, compileall, benchmark stability with unchanged baseline,
-  pytest 1434 passed / 7 skipped at 83.22% coverage against the 70% floor,
+  pytest 1436 passed / 7 skipped at 83.22% coverage against the 70% floor,
   report-mode and smoke gates), but pushing to the remote is currently
   denied by the stored GitHub credential (403), so no remote run exists
   for the latest commits. Local performance references: OWASP benchmark
-  planner time 1.465 s planted / 0.628 s hardened; full suite 272–304 s.
+  planner time 1.465 s planted / 0.628 s hardened; full suite 260–304 s.
 
 ## Remaining audit items (non-blocking)
 

@@ -57,8 +57,8 @@ Cari lokal qapılar (WSL Ubuntu, Python 3.14, real CLI alətləri ilə):
 |---|---|
 | `ruff check --select E4,E7,E9,F,B,W qbh tests main.py` | PASS, exit 0 |
 | `compileall -q qbh tests main.py` | PASS, exit 0 |
-| Full pytest (real CLI gates) | **1434 passed, 7 skipped**, 272.22 s, exit 0 |
-| `pytest --cov=qbh --cov-fail-under=70` | **83.22%**, 1434 passed, exit 0 |
+| Full pytest (real CLI gates) | **1436 passed, 7 skipped**, 260.53 s, exit 0 |
+| `pytest --cov=qbh --cov-fail-under=70` | **83.22%**, exit 0 |
 | Benchmark stability (`compare` + iki `bench_metrics`) | PASS, regressions=[], baseline dəyişməyib |
 | OWASP detection benchmark | **6/6**, 0 hardened FP; planted 4 confirmed + 3 candidate |
 | Report-mode smoke + `tests/test_smoke.py` | PASS, exit 0 |

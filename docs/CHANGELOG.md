@@ -38,7 +38,7 @@
 - Namespace Juice Shop lab end-to-end doğrulanıb (pinned image, bubblewrap,
   Unix ingress, loopback-only); lab skriptləri CRLF→LF düzəldilib və
   `.gitattributes` ilə LF saxlanılır; verify skripti `--port` qəbul edir.
-- Lokal qapılar: 1434 passed / 7 skipped, coverage 83.22% (floor 70%),
+- Lokal qapılar: 1436 passed / 7 skipped, coverage 83.22% (floor 70%),
   benchmark stability və smoke PASS. Remote CI hələ işləməyib (push 403);
   v4.0.0 tag-i və production-ready iddiası yoxdur.
 
