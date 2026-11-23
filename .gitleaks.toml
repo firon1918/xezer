@@ -1,14 +1,13 @@
 [extend]
 useDefault = true
 
-[[allowlists]]
-description = "Fake secrets in all Python test fixtures"
-paths = [
-  '''tests/.*\.py''',
-]
+# v8.24.3 ignores top-level [[allowlists]] for `detect` findings; a rule-level
+# allowlist merged into generic-api-key by id is the narrow supported form.
+[[rules]]
+id = "generic-api-key"
 
-[[allowlists]]
-description = "RFC 6238 synthetic test vectors"
+[[rules.allowlists]]
+description = "Synthetic RFC 6238 appendix B TOTP vectors (tests/test_auth_variants.py only)"
 paths = [
   '''tests/test_auth_variants\.py''',
 ]

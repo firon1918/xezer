@@ -30,7 +30,13 @@ jobs:
 
   test:
     name: Tests (py${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: since 2026-11-19 that resolves to ubuntu-26.04,
+    # whose AppArmor 5.0 loads bwrap-userns-restrict and stacks every bwrap child
+    # into unpriv_bwrap with "audit deny capability". The trusted runner then
+    # cannot hold CAP_NET_ADMIN, so loopback/netfilter setup fails closed (125).
+    # 24.04 ships that profile only in extra-profiles (never loaded), so the
+    # sysctl below suffices. Never relax XEzer isolation to fit a newer image.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:

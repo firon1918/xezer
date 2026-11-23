@@ -335,22 +335,30 @@ async def main():
     command = sys.argv[2:]
     if mode not in {"http", "dns", "dns+http"} or not command:
         fail("invalid runner mode")
+    stage = "setup"
     try:
+        stage = "loopback"
         bring_up_loopback()
+        stage = "drop_capabilities"
         drop_capabilities()
         relay_port = dns_port = None
         server = dns_server = dns_transport = None
         if mode in {"http", "dns+http"}:
+            stage = "default_route"
             add_default_route()
+            stage = "relay_listen"
             server = await asyncio.start_server(relay_accept, "0.0.0.0", 0)
             relay_port = server.sockets[0].getsockname()[1]
         if mode in {"dns", "dns+http"}:
+            stage = "dns_listen"
             loop = asyncio.get_running_loop()
             dns_transport, _ = await loop.create_datagram_endpoint(
                 DNSUDP, local_addr=("0.0.0.0", 0))
             dns_port = dns_transport.get_extra_info("sockname")[1]
             dns_server = await asyncio.start_server(dns_tcp, "0.0.0.0", dns_port)
+        stage = "redirects"
         install_redirects(relay_port, dns_port)
+        stage = "child_env"
         env = dict(os.environ)
         if relay_port is not None:
             proxy = f"http://127.0.0.1:{relay_port}"
@@ -363,7 +371,9 @@ async def main():
         command = [arg.replace("{XEzer_PROXY}", replacements["{XEzer_PROXY}"])
                        .replace("{XEzer_DNS}", replacements["{XEzer_DNS}"])
                    for arg in command]
+        stage = "child_launch"
         child = await asyncio.create_subprocess_exec(*command, env=env)
+        stage = "child_wait"
         code = await child.wait()
         if server is not None:
             server.close()
@@ -377,7 +387,10 @@ async def main():
     except SystemExit:
         raise
     except Exception as exc:  # noqa: BLE001 - fail closed with a bounded reason
-        fail(type(exc).__name__)
+        # Stage + type + errno only: never exception text (may carry paths/args).
+        errno = getattr(exc, "errno", None)
+        suffix = f":errno{errno}" if errno is not None else ""
+        fail(f"{stage}:{type(exc).__name__}{suffix}")
 
 
 if __name__ == "__main__":

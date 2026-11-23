@@ -1,5 +1,6 @@
 import asyncio
 import ipaddress
+import sys
 
 import aiohttp
 from aiohttp import web
@@ -411,7 +412,21 @@ async def test_ffuf_input_and_output_are_preserved(tmp_path):
         await runner.cleanup()
 
 
-@pytest.mark.parametrize("secure_proxy", [False, True])
+@pytest.mark.parametrize(
+    "secure_proxy",
+    [
+        False,
+        # TLS-in-TLS (HTTPS proxy) needs loop.start_tls() on an SSL transport,
+        # which Python only supports from 3.11; on 3.10 aiohttp fails closed.
+        pytest.param(
+            True,
+            marks=pytest.mark.skipif(
+                sys.version_info < (3, 11),
+                reason="TLS-in-TLS requires Python 3.11+ start_tls on SSL transports",
+            ),
+        ),
+    ],
+)
 async def test_proxy_tls_numeric_connect_sni_and_credentials(
     tmp_path, monkeypatch, secure_proxy
 ):
