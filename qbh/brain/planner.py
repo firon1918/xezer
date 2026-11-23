@@ -125,7 +125,8 @@ class BrainPlanner:
         if not self.runtime.vault.available:
             store.transition(plan_id, context.scan_id, 'deferred', 'vault_unavailable_retryable')
             return {'status': 'deferred'}
-        store.transition(plan_id, context.scan_id, 'running', 'authorized_at_execution')
+        if not store.claim(plan_id, context.scan_id, plan.prerequisite_hash):
+            return {'status': 'not_claimed'}
         try:
             result = await plugin.execute_test(context, current)
         except asyncio.CancelledError:
@@ -135,8 +136,9 @@ class BrainPlanner:
             # Raw exception strings may contain URLs, cookies, or provider credentials.
             store.transition(plan_id, context.scan_id, 'failed', 'strategy_error:' + type(exc).__name__)
             return {'status': 'failed'}
-        from .strategies.idor import has_confirmation
-        confirmed = plan.vuln_class == 'idor' and has_confirmation(result)
+        import importlib
+        gate = getattr(importlib.import_module(type(plugin).__module__), 'has_confirmation', None)
+        confirmed = result.status == 'confirmed' and callable(gate) and gate(result)
         if result.status == 'confirmed' and not confirmed:
             result.status, result.reason, result.confirmed = 'inconclusive', 'confirmation_evidence_incomplete', False
         encrypted = self.runtime.vault.encrypt(canonical(asdict(result)))
@@ -156,7 +158,7 @@ class BrainPlanner:
         store.transition(plan_id, context.scan_id, result.status, result.reason, result_enc=encrypted, finding_id=finding_id)
         return {'status': result.status, 'finding_id': finding_id}
 
-    async def execute_ready(self, *, budget=None):
+    async def execute_ready(self, *, budget=None, plan_ids=None):
         maximum = int(self.runtime.cfg.chain.max_tasks) if budget is None else max(0, int(budget))
         cap = max(1, int(self.runtime.cfg.effective_concurrency))
         sched = Scheduler(workers=cap, global_limit=cap, per_host_limit=cap, ledger=self.ledger,
@@ -165,6 +167,8 @@ class BrainPlanner:
         dispatched = []
         async with sched:
             for plan_id, (context, plan) in self._prepared.items():
+                if plan_ids is not None and plan_id not in plan_ids:
+                    continue
                 row = store.get(plan_id, context.scan_id)
                 if row['status'] != 'ready':
                     continue

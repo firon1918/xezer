@@ -170,6 +170,8 @@ class JWTEngine(OffensiveEngine):
                 ["jwt_tool", tok, "-X", mode], timeout=self.timeout)
             if proc.missing:
                 return ""
+            if proc.blocked:
+                return ""
             combined += "\n" + (proc.stdout.decode(errors="ignore")
                                 + proc.stderr.decode(errors="ignore"))
         return combined

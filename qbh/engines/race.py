@@ -79,11 +79,8 @@ class RaceEngine:
         async def hit(session):
             async with sem:
                 try:
-                    async with session.get(
-                            fixture, timeout=aiohttp.ClientTimeout(total=TIMEOUT),
-                            allow_redirects=False) as r:
-                        body = (await r.text(errors="ignore"))[:2000]
-                        return r.status, body
+                    r = await self.ctx.request(session, 'GET', fixture, allow_redirects=False)
+                    return r.status, r.text[:2000]
                 except (aiohttp.ClientError, asyncio.TimeoutError):
                     return 0, ""
 

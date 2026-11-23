@@ -187,6 +187,9 @@ async def run_process(cmd: list[str], *, stdin: bytes | None = None,
     """
     guard = _process_guard.get()
     extra_env: dict | None = None
+    if guard is not None and hasattr(guard, 'run_mediated'):
+        return await guard.run_mediated(cmd, targets=targets, stdin=stdin,
+                                       timeout=timeout, cancel_event=cancel_event)
     if guard is not None:
         blocked, extra_env = await guard.prepare_process(cmd, targets)
         if blocked is not None:

@@ -1,0 +1,28 @@
+<!-- coderabbit-ai-generated:v1 -->
+
+<!-- coderabbit-ai-generated-section:v1:b3dfc601def99b124dffeb225300372aa7b001b0ab6998bbff60a0db24ffa1dd -->
+
+# Security boundaries — current checkpoint
+
+Authorization and ScopeEnforcer decide native scope/RoE. HttpPolicy rechecks inside the concurrency slot. Path matching includes bounded decode/canonical variants; deny globs are case-normalized. Context/Conductor propagate dry-run and active-fuzz restrictions. Dry-run guarded requests/processes fail before sending; end-to-end dry-run coverage spans DNS broker, socket guard, process egress, provider policy and installer (`tests/test_dns_mediation.py`, `tests/test_socket_namespace.py`, `tests/test_network_boundary.py`, `tests/test_provider_policy.py`, `tests/test_security_boundaries.py`, `tests/test_installer.py`).
+
+All scanner child TCP egress runs inside a scoped namespace (`qbh/scoped_child.py`): the default route and iptables REDIRECT force every connection into the broker relay, and each request is re-authorized at the RequestBroker (scope, path, method, rate, cooldown). Broker denial closes the exchange without a synthetic response; non-HTTP protocols fail closed; DNS is bridged through the scoped resolver with per-answer IP/port validation and no second lookup. Verified by `tests/test_proxy_mediation.py` (mandatory mediation, direct-escape denial, HTTPS decryption and re-authorization, proxy-unaware raw-socket child restricted path/method denial with zero target hits, ffuf input/output preservation) and `tests/test_dns_mediation.py`. Method override headers are re-authorized (`tests/test_capability_preservation.py`); cross-origin cookie/credential filtering is enforced by auth state (`tests/test_auth_state.py`).
+
+Alternate transport forwards request kwargs and transfers cookies through the caller's jar. Each curl request owns a fresh session, preventing ambient cross-identity cookies. This intentionally trades connection reuse for isolation. Response redirects are handled by HttpPolicy; origin/path/secure/expiry cookie filtering and mutated-context export refusal are regression-tested. Timeout retries are disabled for state-changing methods because server execution may have succeeded before the response was lost.
+
+Plan decisions use conditional SQL updates with replay rejection; execution claims are single-use and prerequisite-version-bound, and authorization is rechecked after preparation and approval (`tests/test_brain_planner.py`). Decisions and encrypted result history survive restart.
+
+Plugin additions must reuse authorization, request mutation/comparison and encrypted evidence. Existing interface is described in qbh/brain/strategy.py. Six Brain strategy modules exist (IDOR, JWT implementation weakness, SQLi, SSTI, LFI/path traversal, XSS); knowledge entries are not implementations. Each active plugin's confirmation is gated by its module-level `has_confirmation` (paired controls, distinct literals/products, repetition, negative controls); the planner downgrades any ungated `confirmed` to `inconclusive`. XSS never self-confirms without independent browser execution evidence; LFI requires an operator-designated synthetic canary. Loopback planted/hardened benchmark: `tests/benchmarks/owasp_detection.py` (6/6 detections, 0 hardened false positives).
+
+## Provider control plane and native fallback enforcement
+
+Certificate transparency and advisory sources remain query services, distinct from assessment targets. Previously DeepEnum._crtsh and CVE/library intelligence sent raw aiohttp traffic. The provider facade now uses the same HttpPolicy transport, validated DNS connector, TLS verification and scan rate/concurrency state. Its compile-time grants are exact method/origin/path tuples for crt.sh, CISA KEV, EPSS, OSV, GitHub advisories and NVD. OSV POST is a read-only advisory query, not target state modification. Target permissions are never expanded; enterprise private-IP grants are not copied to provider scope. Target deny rules and scan lifecycle/rules remain effective. No target cookies, credentials, rotating identity or ambient proxy settings are inherited. Provider audit records omit query content and request headers.
+
+This repairs a documented distinction: providers are not scanning targets, but that does not exempt their network traffic from enforcement. Redirect destinations require an independent endpoint grant. Responses are size bounded by HttpPolicy and JSON nesting is limited to 64. Truncated or invalid data does not become advisory evidence.
+
+Fingerprint and OpenAPI's fallback paths now call Context.request, including when Guardian is absent. A context without a policy-bearing request path fails closed. The explicitly configured loopback race fixture also requires normal target authorization and obeys dry-run; merely setting --race-fixture no longer circumvents request restrictions. This intentionally removes the earlier unchecked fixture exception, as required by centralized enforcement, while preserving authorized fixture execution.
+
+Verification: real loopback provider queries and crt.sh/OSV parsing, no credentials inherited, shared budgets, exact endpoint/method restrictions, redirects, private DNS exclusion despite target private grants, cancellation/dry-run, parent operation restrictions, truncation and nested JSON. Native fallback and race tests prove allowed traffic and zero subsequent requests after denial. No live public provider availability is asserted by these fixtures.
+
+
+<!-- /coderabbit-ai-generated:v1 -->

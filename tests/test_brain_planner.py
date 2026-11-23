@@ -157,3 +157,34 @@ def test_chain_local_engine_denial_is_recorded_without_a_ledger(make_ctx):
     assert chain._begin('hidden_param_detect', 'param') is None
     assert len(chain.skipped) == 2
     assert all('authorization' in reason for reason in chain.skipped)
+
+async def test_selected_plan_does_not_execute_other_ready_plans(brain):
+    from dataclasses import replace
+    runtime, context, _ = brain
+    planner = BrainPlanner(runtime)
+    first = next(r for r in planner.prepare(context) if r['status'] == 'ready')
+    other = replace(context, request_id=None, url_id=None,
+                    request={**context.request, 'url': 'http://127.0.0.1/api/user/456'})
+    second = next(r for r in planner.prepare(other) if r['status'] == 'ready')
+    assert first['id'] != second['id']
+    await planner.execute_ready(plan_ids={first['id']})
+    assert store.get(first['id'], runtime.scan_id)['status'] == 'candidate'
+    assert store.get(second['id'], runtime.scan_id)['status'] == 'ready'
+
+
+def test_decision_replay_rejected(brain):
+    runtime, context, _ = brain
+    row = BrainPlanner(runtime).prepare(context)[0]
+    store.decide(row['id'], runtime.scan_id, approve=True, reason='first')
+    with pytest.raises(ValueError, match='plan_decision_conflict'):
+        store.decide(row['id'], runtime.scan_id, approve=True, reason='replay')
+
+
+def test_execution_claim_is_single_use_and_version_bound(brain):
+    runtime, context, _ = brain
+    row = next(r for r in BrainPlanner(runtime).prepare(context) if r['status'] == 'ready')
+    assert not store.claim(row['id'], runtime.scan_id, 'stale-version')
+    assert store.claim(row['id'], runtime.scan_id, row['prerequisite_hash'])
+    assert not store.claim(row['id'], runtime.scan_id, row['prerequisite_hash'])
+    BrainPlanner(runtime).prepare(context)
+    assert store.get(row['id'], runtime.scan_id)['status'] == 'running'

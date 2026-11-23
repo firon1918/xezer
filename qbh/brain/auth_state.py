@@ -2,12 +2,17 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 from dataclasses import dataclass, field
 from datetime import datetime, timezone, timedelta
 from email.utils import parsedate_to_datetime
+import hashlib
+import hmac
 from http.cookies import SimpleCookie
 import json
 import os
+import struct
+import time
 import uuid
 from urllib.parse import urlsplit
 
@@ -41,6 +46,16 @@ def _json_response(response):
     except (ValueError, TypeError):
         return {}
     return value if isinstance(value, dict) else {}
+
+
+def totp(secret_b32, digits=6, period=30, algorithm='SHA1', when=None):
+    """RFC 6238 TOTP from a base32 secret; stdlib only, no new dependency."""
+    key = base64.b32decode(secret_b32.upper() + '=' * (-len(secret_b32) % 8))
+    counter = int((time.time() if when is None else when) // period)
+    digest = hmac.new(key, struct.pack('>Q', counter), getattr(hashlib, algorithm.lower())).digest()
+    offset = digest[-1] & 0x0F
+    code = struct.unpack('>I', digest[offset:offset + 4])[0] & 0x7FFFFFFF
+    return str(code % 10 ** digits).zfill(digits)
 
 
 @dataclass
@@ -165,6 +180,14 @@ class AuthStateMachine:
             cookies[cookie['name']] = cookie['value']
         if cookies:
             headers['Cookie'] = '; '.join(m.OutputString() for m in cookies.values())
+        spec = self._configs.get(context.name, {})
+        if spec.get('csrf_header'):
+            # Double-submit: the CSRF cookie value travels as a header, so a
+            # cross-site form cannot read it. Expired/missing cookie fails closed.
+            morsel = cookies.get(spec['csrf_cookie'])
+            if morsel is None or not morsel.value:
+                raise ValueError('csrf_cookie_unavailable')
+            headers[spec['csrf_header']] = morsel.value
         if not headers:
             raise ValueError('no_credentials_for_request_path')
         return headers
@@ -206,6 +229,21 @@ class AuthStateMachine:
             result[name] = value
         return result
 
+    def _totp_secret(self, spec):
+        if 'totp_secret_env' in spec:
+            value = os.environ.get(spec['totp_secret_env'])
+        elif 'totp_secret_vault_ref' in spec:
+            row = db.get_db().execute(
+                'SELECT s.value_enc FROM secrets s JOIN hosts h ON h.id=s.host_id '
+                'WHERE s.id=? AND h.scan_id=? AND h.subdomain=?',
+                (spec['totp_secret_vault_ref'], self.scan_id, urlsplit(spec['login_url']).hostname)).fetchone()
+            value = self.runtime.vault.decrypt(row['value_enc']) if row else None
+        else:
+            return None
+        if not value:
+            raise ValueError('credential_source_unavailable')
+        return value
+
     @staticmethod
     def _cookies(jar):
         cookies = []
@@ -230,6 +268,99 @@ class AuthStateMachine:
         allowed = {'session_rejected', 'expired', 'identity_changed'}
         self._event(context, 'invalid', reason if reason in allowed else 'session_rejected')
 
+    async def refresh(self, context):
+        """Exchange a stored refresh token for a new session at the same origin.
+
+        Bounded and audited: the refresh token never appears in events or logs,
+        and a failed refresh invalidates the context instead of retrying forever.
+        """
+        if self.contexts.get(context.name) is not context:
+            raise ValueError('unregistered_auth_context')
+        spec = self._configs[context.name]
+        if not spec.get('refresh_url'):
+            return False
+        try:
+            payload = self._payload(context)
+        except ValueError:
+            return False
+        refresh_token = payload.get('refresh_token')
+        if not refresh_token or not self.runtime.vault.available:
+            return False
+        auth = self.runtime._auth()
+        evidence = []
+        try:
+            auth.ensure_active()
+            auth.authorize_request(spec['refresh_method'], spec['refresh_url'], 'authentication')
+            auth.require('authentication')
+            async with aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True)) as session:
+                body = {'refresh_token': refresh_token}
+                kwargs = ({'json': body} if spec['refresh_format'] == 'json' else {'data': body})
+                response = await self.runtime.guardian.request(
+                    session, spec['refresh_method'], spec['refresh_url'],
+                    allow_redirects=False, retries=0, **kwargs)
+                evidence.append({'kind': 'refresh_response', 'status': response.status,
+                                 'headers': dict(response.headers), 'body': response.text})
+                document = _json_response(response)
+                token = _field(document, spec['token_field'])
+                if token is not None and not isinstance(token, str):
+                    raise ValueError('invalid_auth_token_type')
+                authorization = 'Bearer ' + token if token else ''
+                cookies = self._cookies(session.cookie_jar)
+                if not 200 <= response.status < 300 or not (authorization or cookies):
+                    raise ValueError('refresh_not_authenticated')
+                subject, verified = payload.get('subject'), False
+                if spec.get('verify_url'):
+                    auth.ensure_active()
+                    auth.authorize_request('GET', spec['verify_url'], 'authentication')
+                    auth.require('authentication')
+                    headers = {'Authorization': authorization} if authorization else {}
+                    check = await self.runtime.guardian.get(session, spec['verify_url'], headers=headers,
+                                                            allow_redirects=False, retries=0)
+                    evidence.append({'kind': 'identity_response', 'status': check.status,
+                                     'headers': dict(check.headers), 'body': check.text})
+                    verified_subject = _field(_json_response(check), spec['subject_field'])
+                    if not 200 <= check.status < 300 or not isinstance(verified_subject, (str, int)) or isinstance(verified_subject, bool):
+                        raise ValueError('identity_verification_failed')
+                    if subject is not None and str(subject) != str(verified_subject):
+                        raise ValueError('identity_subject_changed')
+                    subject, verified = verified_subject, True
+                cookies = self._cookies(session.cookie_jar) or payload['cookies']
+            new_token = _field(document, spec['refresh_token_field'])
+            payload = {'authorization': authorization, 'cookies': cookies, 'subject': subject,
+                       'identity_verified': verified, 'origin': context.origin,
+                       'credential_digest': payload.get('credential_digest'),
+                       'refresh_token': new_token if isinstance(new_token, str) and new_token else refresh_token}
+            encrypted = self.runtime.vault.encrypt(canonical(payload))
+            if encrypted is None:
+                raise ValueError('session_encryption_failed')
+            reference = uuid.uuid4().hex
+            conn = db.get_db()
+            with conn:
+                conn.execute('INSERT INTO auth_sessions(id,scan_id,context_name,payload_enc,created_at) VALUES(?,?,?,?,?)',
+                             (reference, self.scan_id, context.name, encrypted, db._now()))
+            context.session_id = reference
+            context.cookies = {c['name']: reference for c in cookies}
+            context.valid_until = _now() + timedelta(seconds=spec['session_ttl_seconds'])
+            context.identity_verified = verified
+            context.subject_digest = digest(subject) if subject is not None else ''
+            self._event(context, 'authenticated', 'session_refreshed', evidence)
+            return True
+        except (ValueError, ScopeError, aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            self._event(context, 'invalid', 'refresh_failed:' + type(exc).__name__, evidence)
+            return False
+
+    async def ensure_valid(self, context):
+        """Valid session, or one bounded refresh attempt per expired session."""
+        if self.is_valid(context):
+            return True
+        if not hasattr(self, '_refresh_attempts'):
+            self._refresh_attempts = set()
+        session_id = context.session_id
+        if not session_id or session_id in self._refresh_attempts:
+            return False
+        self._refresh_attempts.add(session_id)
+        return await self.refresh(context)
+
     async def authenticate(self, context):
         if self.contexts.get(context.name) is not context:
             raise ValueError('unregistered_auth_context')
@@ -244,6 +375,13 @@ class AuthStateMachine:
             auth.authorize_request(spec['login_method'], spec['login_url'], 'authentication')
             auth.require('authentication')
             credentials = self._credentials(spec)
+            # The digest tracks configured credential sources only; a TOTP code
+            # changes every login and must not look like a credential change.
+            credential_digest = digest(credentials)
+            secret = self._totp_secret(spec)
+            if secret is not None:
+                credentials[spec['totp_field']] = totp(
+                    secret, spec['totp_digits'], spec['totp_period'], spec['totp_algorithm'])
             # Fresh jar per identity; never share the scan's ambient cookie jar.
             async with aiohttp.ClientSession(cookie_jar=aiohttp.CookieJar(unsafe=True)) as session:
                 basic = aiohttp.BasicAuth(credentials['username'], credentials['password']).encode() if spec['login_format'] == 'basic' else ''
@@ -258,6 +396,11 @@ class AuthStateMachine:
                 token = _field(document, spec['token_field'])
                 if token is not None and not isinstance(token, str):
                     raise ValueError('invalid_auth_token_type')
+                refresh_token = None
+                if spec.get('refresh_url'):
+                    refresh_token = _field(document, spec['refresh_token_field'])
+                    if refresh_token is not None and not isinstance(refresh_token, str):
+                        raise ValueError('invalid_refresh_token_type')
                 authorization = 'Bearer ' + token if token else basic
                 cookies = self._cookies(session.cookie_jar)
                 if not 200 <= response.status < 300 or not (authorization or cookies):
@@ -289,7 +432,8 @@ class AuthStateMachine:
                     subject, verified = verified_subject, True
                 cookies = self._cookies(session.cookie_jar)
             payload = {'authorization': authorization, 'cookies': cookies, 'subject': subject,
-                       'identity_verified': verified, 'origin': context.origin, 'credential_digest': digest(credentials)}
+                       'identity_verified': verified, 'origin': context.origin, 'credential_digest': credential_digest,
+                       'refresh_token': refresh_token}
             encrypted = self.runtime.vault.encrypt(canonical(payload))
             if encrypted is None:
                 raise ValueError('session_encryption_failed')
@@ -324,5 +468,6 @@ class AuthStateMachine:
             attempt = (context.name, digest(spec), credential_version, context.session_id)
             if not self.is_valid(context) and attempt not in self._attempts:
                 self._attempts.add(attempt)
-                await self.authenticate(context)
+                if not await self.ensure_valid(context):
+                    await self.authenticate(context)
         return self.contexts

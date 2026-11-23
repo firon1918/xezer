@@ -4,7 +4,11 @@ import re
 from urllib.parse import urlsplit
 
 ALLOWED = {'name', 'role', 'login_url', 'login_method', 'login_fields', 'login_format',
-           'verify_url', 'subject_field', 'token_field', 'session_ttl_seconds'}
+           'verify_url', 'subject_field', 'token_field', 'session_ttl_seconds',
+           'refresh_url', 'refresh_method', 'refresh_token_field', 'refresh_format',
+           'csrf_cookie', 'csrf_header',
+           'totp_secret_env', 'totp_secret_vault_ref', 'totp_field',
+           'totp_digits', 'totp_period', 'totp_algorithm'}
 
 
 def origin(url):
@@ -71,5 +75,53 @@ def validate_contexts(value):
         ttl = item.setdefault('session_ttl_seconds', 900)
         if type(ttl) is not int or ttl < 1 or ttl > 86400:
             raise ValueError('invalid_session_ttl')
+        if item.get('refresh_url'):
+            if origin(item['refresh_url']) != login_origin:
+                raise ValueError('refresh_origin_must_match_login')
+            item.setdefault('refresh_method', 'POST')
+            if item['refresh_method'] not in {'GET', 'POST'}:
+                raise ValueError('unsupported_refresh_method')
+            item.setdefault('refresh_format', 'json')
+            if item['refresh_format'] not in {'json', 'form'}:
+                raise ValueError('invalid_refresh_format')
+            item.setdefault('refresh_token_field', 'refresh_token')
+            if not isinstance(item['refresh_token_field'], str) or not re.fullmatch(
+                    r'[A-Za-z_][A-Za-z0-9_.]{0,100}', item['refresh_token_field']):
+                raise ValueError('invalid_auth_response_field')
+        elif any(k in item for k in ('refresh_method', 'refresh_format', 'refresh_token_field')):
+            raise ValueError('refresh_options_require_refresh_url')
+        if ('csrf_cookie' in item) != ('csrf_header' in item):
+            raise ValueError('csrf_cookie_and_header_required_together')
+        if 'csrf_cookie' in item:
+            if not isinstance(item['csrf_cookie'], str) or not re.fullmatch(r'[A-Za-z0-9_-]{1,80}', item['csrf_cookie']):
+                raise ValueError('invalid_csrf_cookie_name')
+            if not isinstance(item['csrf_header'], str) or not re.fullmatch(r'[A-Za-z0-9-]{1,80}', item['csrf_header']):
+                raise ValueError('invalid_csrf_header_name')
+        if ('totp_secret_env' in item) == ('totp_secret_vault_ref' in item):
+            if 'totp_secret_env' in item or 'totp_secret_vault_ref' in item:
+                raise ValueError('exactly_one_totp_secret_reference_required')
+        if 'totp_secret_env' in item:
+            reference = item['totp_secret_env']
+            if not isinstance(reference, str) or not re.fullmatch(r'[A-Z_][A-Z0-9_]*', reference):
+                raise ValueError('invalid_credential_env_reference')
+        if 'totp_secret_vault_ref' in item:
+            reference = item['totp_secret_vault_ref']
+            if type(reference) is not int or reference < 1:
+                raise ValueError('invalid_credential_vault_reference')
+        if 'totp_secret_env' in item or 'totp_secret_vault_ref' in item:
+            item.setdefault('totp_field', 'otp')
+            if not isinstance(item['totp_field'], str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_]{0,79}', item['totp_field']):
+                raise ValueError('invalid_totp_field')
+            digits = item.setdefault('totp_digits', 6)
+            if type(digits) is not int or not 6 <= digits <= 8:
+                raise ValueError('invalid_totp_digits')
+            period = item.setdefault('totp_period', 30)
+            if type(period) is not int or not 15 <= period <= 120:
+                raise ValueError('invalid_totp_period')
+            algorithm = item.setdefault('totp_algorithm', 'SHA1')
+            if algorithm not in {'SHA1', 'SHA256', 'SHA512'}:
+                raise ValueError('invalid_totp_algorithm')
+        elif any(k in item for k in ('totp_field', 'totp_digits', 'totp_period', 'totp_algorithm')):
+            raise ValueError('totp_options_require_secret_reference')
         result.append(item)
     return result

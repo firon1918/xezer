@@ -1,12 +1,13 @@
-# gitleaks konfiqurasiyası.
-# Test fixture-ları redaction/maskalama davranışını yoxlamaq üçün UYDURMA
-# (saxta) secret oxşarları saxlayır — bunlar real açarlar deyil.
-# Yalnız `tests/` qovluğu allowlist-ə salınır; real kod bazası skan edilir.
 [extend]
 useDefault = true
 
-[[allowlists]]
-description = "Fake secrets in test fixtures (redaction tests)"
+# v8.24.3 ignores top-level [[allowlists]] for `detect` findings; a rule-level
+# allowlist merged into generic-api-key by id is the narrow supported form.
+[[rules]]
+id = "generic-api-key"
+
+[[rules.allowlists]]
+description = "Synthetic RFC 6238 appendix B TOTP vectors (tests/test_auth_variants.py only)"
 paths = [
-  '''tests/.*\.py''',
+  '''tests/test_auth_variants\.py''',
 ]

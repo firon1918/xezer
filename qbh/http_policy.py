@@ -356,10 +356,13 @@ class HttpPolicy:
         await self.acquire(host)
 
         max_tries = self.max_retries if retries is None else max(0, int(retries))
+        if method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+            max_tries = 0  # Delivery may have succeeded even when the response was lost.
         attempt = 0
         rotate_attempts = 0
         current = url
         redirects = 0
+        anonymous_redirect = False
         #: Faza 1 (§6.3): MƏHZ bu sorğu zamanı yaranan blok hadisələri —
         #: konkurent atribusiya üçün `record(..., sink=events)` ilə toplanır.
         events: list[BlockEvent] = []
@@ -377,8 +380,13 @@ class HttpPolicy:
                     if px:
                         call_kwargs["proxy"] = px
             try:
-                status, head, text, truncated, elapsed = await self._fetch_once(
-                    session, method, current, attempt_headers, call_kwargs, host)
+                if anonymous_redirect and isinstance(session, aiohttp.ClientSession):
+                    async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar(), trust_env=False) as anonymous:
+                        status, head, text, truncated, elapsed = await self._fetch_once(
+                            anonymous, method, current, {}, call_kwargs, host)
+                else:
+                    status, head, text, truncated, elapsed = await self._fetch_once(
+                        session, method, current, attempt_headers, call_kwargs, host)
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                 if self.metrics is not None:
                     self.metrics.record_error(
@@ -395,9 +403,25 @@ class HttpPolicy:
                 location = head.get("Location")
                 if location and redirects < self.max_redirects:
                     redirects += 1
-                    current = self.scope.resolve_redirect(current, location)
+                    from urllib.parse import urlsplit
+                    previous = urlsplit(current)
+                    destination = self.scope.resolve_redirect(current, location)
+                    target = urlsplit(destination)
+                    if (previous.scheme, previous.hostname, previous.port) != (target.scheme, target.hostname, target.port):
+                        # Caller cookies, auth objects and body may carry credentials.
+                        from .authorization import RuleForbidden
+                        if status != 303 and (method.upper() not in {'GET', 'HEAD', 'OPTIONS'} or any(k in kwargs for k in ('data', 'json'))):
+                            raise RuleForbidden('cross_origin_body_requires_explicit_replay')
+                        anonymous_redirect = True
+                        headers = {}
+                        kwargs = {k:v for k,v in kwargs.items() if k not in {'auth','cookies'}}
+                    current = destination
+                    host = self.scope.authorize(extract_host(current))
+                    await self.acquire(host)
                     if status == 303:
                         method = "GET"
+                        kwargs = {k:v for k,v in kwargs.items() if k not in {'data','json'}}
+                        headers = {k:v for k,v in (headers or {}).items() if k.lower() not in {'content-length','content-type','transfer-encoding'}}
                     continue
 
             # ---- blok (403/429) → adaptiv strategiya ----
@@ -411,7 +435,8 @@ class HttpPolicy:
                             head.get("Retry-After") or head.get("retry-after")
                         ) if status == 429 else 0.0
                         await asyncio.sleep(min(max(ra, self.backoff_base), 5.0))
-                    if (rotate_attempts < self.max_rotate_attempts
+                    if (method.upper() in {"GET", "HEAD", "OPTIONS"}
+                            and rotate_attempts < self.max_rotate_attempts
                             and self.identity_provider is not None):
                         if self.identity_provider.rotate(
                                 host, reason=f"HTTP {status} ({strategy})"):
@@ -463,12 +488,122 @@ class HttpPolicy:
         səviyyə — tutulur və gövdə oxunması daxil olmaqla bütün cəhdi əhatə edir.
         """
         async with self._slot(host):
+            authorization = getattr(self, "authorization", None)
+            if authorization is not None:
+                authorization.authorize_request(method, url)
             started = time.monotonic()
+            # Real aiohttp callers use a policy-owned connector. Injected mock
+            # sessions remain test doubles and never transmit network traffic.
+            if isinstance(session, aiohttp.ClientSession):
+                from .authorization import Authorization
+                from .network_policy import PolicyResolver, validate_options
+                if authorization is None:
+                    authorization = Authorization(scope=self.scope)
+                    self.authorization = authorization
+                auth = authorization
+                auth.authorize_request(method, url)
+                effective_headers = dict(session.headers)
+                effective_headers.update(headers or {})
+                from .authorization import RuleForbidden
+                call_kwargs = dict(call_kwargs)
+                proxy = call_kwargs.pop('proxy', None) or getattr(session, '_default_proxy', None) or getattr(self.transport, 'proxy', None)
+                proxy_auth = call_kwargs.pop('proxy_auth', None) or getattr(session, '_default_proxy_auth', None)
+                if proxy_auth and not proxy:
+                    raise RuleForbidden('proxy_auth_without_proxy')
+                validate_options(auth, url, effective_headers, call_kwargs)
+                if session.trust_env:
+                    raise RuleForbidden('ambient_proxy_settings_forbidden')
+                if proxy:
+                    from .proxy_transport import PinnedProxyConnector
+                    # Dedicated caller-owned pool; proxy identity is part of its binding.
+                    fingerprint = (auth, repr((auth.scope, auth.allowed_ports)), str(proxy), proxy_auth)
+                    connector = session.connector
+                    binding = getattr(connector, '_xezer_proxy_binding', None)
+                    if binding is not None and binding != fingerprint:
+                        raise RuleForbidden('proxy_or_policy_changed_requires_new_session')
+                    if binding is None:
+                        if not session.connector_owner:
+                            raise RuleForbidden('shared_connector_requires_policy_owned_session')
+                        replacement = PinnedProxyConnector(auth, proxy, proxy_auth,
+                            limit=connector.limit, limit_per_host=connector.limit_per_host)
+                        replacement._xezer_proxy_binding = fingerprint
+                        session._connector = replacement
+                        await connector.close()
+                    # aiohttp's built-in proxy path must not resolve the target again.
+                    async with session.request(method, url, headers=headers, allow_redirects=False,
+                            proxy='', proxy_auth=None,
+                            timeout=aiohttp.ClientTimeout(total=self.total_timeout, connect=self.connect_timeout),
+                            **call_kwargs) as response:
+                        text, truncated = await self._read_body(response)
+                        elapsed = time.monotonic() - started
+                        if self.metrics is not None:
+                            self.metrics.record_request(host, response.status, elapsed, transport=False)
+                        return response.status, dict(response.headers), text, truncated, elapsed
+                from urllib.parse import urlsplit
+                import ipaddress
+                try:
+                    ipaddress.ip_address(urlsplit(url).hostname)
+                    literal = True
+                except ValueError:
+                    literal = False
+                # curl has independent DNS resolution. Domain traffic must use
+                # the validated connector until curl supports equivalent pinning.
+                if self._use_transport() and literal:
+                    tr = await self.transport.request(
+                        method, url, headers=headers, allow_redirects=False,
+                        cookie_jar=session.cookie_jar, timeout=self.total_timeout, **call_kwargs)
+                    self.transport_requests += 1
+                    elapsed = time.monotonic() - started
+                    if self.metrics is not None:
+                        self.metrics.record_request(host, tr.status, elapsed, transport=True)
+                    return tr.status, dict(tr.headers), tr.text, tr.truncated, elapsed
+                if session.trust_env:
+                    from .authorization import RuleForbidden
+                    raise RuleForbidden('ambient_proxy_settings_forbidden')
+                if getattr(session.connector, '_xezer_proxy_binding', None) is not None:
+                    raise RuleForbidden('proxy_session_requires_consistent_route')
+                if literal:
+                    async with session.request(method, url, headers=headers, allow_redirects=False,
+                                               timeout=aiohttp.ClientTimeout(total=self.total_timeout,
+                                                                             connect=self.connect_timeout),
+                                               **call_kwargs) as response:
+                        text, truncated = await self._read_body(response)
+                        elapsed = time.monotonic() - started
+                        if self.metrics is not None:
+                            self.metrics.record_request(host, response.status, elapsed, transport=False)
+                        return response.status, dict(response.headers), text, truncated, elapsed
+                # Install a policy-owned pool on the caller session. Its lifetime,
+                # cookies, authentication and close semantics remain caller-owned.
+                fingerprint = repr((auth.scope, auth.allowed_ports))
+                connector = session.connector
+                binding = getattr(connector, '_xezer_policy_binding', None)
+                if binding is None:
+                    if not session.connector_owner:
+                        raise RuleForbidden('shared_connector_requires_policy_owned_session')
+                    original = connector
+                    resolver = PolicyResolver(auth)
+                    connector = aiohttp.TCPConnector(resolver=resolver, use_dns_cache=False,
+                                                     limit=original.limit, limit_per_host=original.limit_per_host)
+                    connector._resolver_owner = True
+                    connector._xezer_policy_binding = (auth, fingerprint)
+                    session._connector = connector
+                    await original.close()
+                elif binding[0] is not auth or binding[1] != fingerprint:
+                    raise RuleForbidden('policy_changed_requires_new_session')
+                async with session.request(method, url, headers=headers, allow_redirects=False,
+                                           timeout=aiohttp.ClientTimeout(total=self.total_timeout,
+                                                                         connect=self.connect_timeout),
+                                           **call_kwargs) as response:
+                    text, truncated = await self._read_body(response)
+                    elapsed = time.monotonic() - started
+                    if self.metrics is not None:
+                        self.metrics.record_request(host, response.status, elapsed, transport=False)
+                    return response.status, dict(response.headers), text, truncated, elapsed
             if self._use_transport():
                 tr = await self.transport.request(
                     method, url, headers=headers, allow_redirects=False,
-                    proxy=call_kwargs.get("proxy"),
-                    timeout=self.total_timeout)
+                    cookie_jar=session.cookie_jar if isinstance(session, aiohttp.ClientSession) else None,
+                    timeout=self.total_timeout, **call_kwargs)
                 self.transport_requests += 1
                 elapsed = time.monotonic() - started
                 if self.metrics is not None:

@@ -126,6 +126,9 @@ class ContentEngine:
             if proc.missing:
                 res.warn("ffuf tapılmadı — atlandı")
                 return
+            if proc.blocked:
+                res.warn(f"{host}: egress qapısı ffuf-u bloklandı — atlandı")
+                return
             incomplete = False
             if proc.timed_out:
                 incomplete = True

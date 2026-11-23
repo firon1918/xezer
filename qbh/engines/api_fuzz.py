@@ -199,14 +199,12 @@ class APIFuzzEngine:
                     session, url, allow_redirects=True,
                     headers={"Accept": "application/json, */*"})
                 status, text = r.status, r.text
-            elif hasattr(self.ctx, "authorize_url"):
-                self.ctx.authorize_url(url)          # scope qapısı (fail-closed)
-                async with session.get(
-                        url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
-                    status = resp.status
-                    text = await resp.text()
-            else:  # pragma: no cover - qoruyucu: heç bir icazəli yol yoxdur
-                return None
+            elif callable(getattr(self.ctx, 'request', None)):
+                r = await self.ctx.request(session, 'GET', url, allow_redirects=True,
+                                           headers={"Accept": "application/json, */*"})
+                status, text = r.status, r.text
+            else:
+                return None  # No policy-bearing context: never use a raw fallback.
         except (aiohttp.ClientError, asyncio.TimeoutError, OSError,
                 ScopeError, TargetBlocked):
             return None

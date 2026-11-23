@@ -85,6 +85,9 @@ class ParamEnumEngine:
         if proc.missing:
             res.warn("arjun tapılmadı")
             return
+        if proc.blocked:
+            res.warn(f"arjun {row['url']}: egress/scope qapısı bloklandı")
+            return
         if proc.timed_out:
             res.warn(f"arjun {row['url']}: timeout")
             return
@@ -123,6 +126,10 @@ class ParamEnumEngine:
             ["x8", "-u", row["url"], "-w", "-", "-X", "GET"],
             stdin=HUNTER_PARAMS.encode(), timeout=TIMEOUT)
         if proc.missing:
+            res.warn("x8 tapılmadı")
+            return
+        if proc.blocked:
+            res.warn(f"x8 {row['url']}: egress/scope qapısı bloklandı")
             return
         if proc.timed_out:
             res.warn(f"x8 {row['url']}: timeout")

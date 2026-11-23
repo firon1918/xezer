@@ -1,43 +1,8 @@
-"""Subprocess egress idarəsi — Faza 0.2 + Faza 1.2 (KRİTİK).
+"""Guarded scan subprocess boundary.
 
-**Problem.** Native HTTP mühərrikləri `HttpPolicy`-dən keçir, lakin subprocess
-alətləri (nuclei, feroxbuster, ffuf, schemathesis, katana, kiterunner, dnstwist,
-gowitness ...) öz şəbəkə trafikini özləri idarə edir. Ona görə də alt-prosesə
-verilən hədəflərin scope-a uyğun olduğunu ƏVVƏLCƏDƏN təsdiqləmək və prosesi
-lazım gəldikdə bütöv proses qrupu ilə öldürmək vacibdir.
-
-**Tək məcburi giriş nöqtəsi (Faza 1.2).**
-
-    proc = await ctx.egress.run(cmd, targets=[...])   # mühərriklər üçün
-
-Əlavə olaraq qapı proses başlatma nöqtəsinin ÖZÜNDƏ — `adapters.base.run_process`
-daxilində — ikinci qat kimi tətbiq olunur:
-
-    with egress.activate():          # Conductor skan boyu bunu edir
-        await run_process(cmd)       # açıq targets + cmd içindəki URL-lər yoxlanır
-
-Beləliklə HEÇ BİR mühərrik (dnstwist, gowitness, semgrep ...) egress yoxlamasını
-keçə bilmir: qapı həm `egress.run()`, həm də birbaşa `run_process()` çağırışında
-işləyir.
-
-**Fail-closed DNS pinning.** Hər icazəli host üçün IP-lər indi həll olunur və
-`ctx.resolved_ips`-ə audit üçün yazılır. Scope xarici hədəf YAXUD həll olunmayan
-(DNS uğursuz) hədəf varsa alt-proses HEÇ BAŞLADILMIR (`ProcResult(blocked=True)`)
-və hadisə audit jurnalına düşür.
-
-**OS səviyyəli sərhəd (opsional, Linux).** `QBH_EGRESS_SANDBOX=firejail` (və ya
-firejail avtomatik aşkarlanarsa) alt-proses `firejail --hosts-file=<pin>` ilə
-işə salınır: pin olunmuş host→IP cədvəli uşağa YALNIZ bu fayl vasitəsilə verilir
-(DNS pinning faktiki tətbiq olunur). `--netfilter` + `--net` verildikdə yalnız
-pin olunmuş IP-lərə çıxışa icazə verən nftables/iptables allowlist yazılır.
-firejail yoxdursa bu qat sakitcə atlanır və auditə `egress_sandbox_unavailable`
-yazılır (`docs/SECURITY_VERIFICATION.md`).
-
-**Dürüst məhdudiyyət (docs/STEALTH.md).** Sandbox aktiv olmadıqda bu, tam
-per-request egress nəzarəti DEYİL: alt-proses öz DNS-ini yenidən həll edə və ya
-redirect izləyə bilər. Tətbiq olunan praqmatik sərhəd: (1) giriş hədəflərinin
-scope + DNS yoxlaması (fail-closed), (2) DNS pinning/audit, (3) opsional firejail
-(DNS pin + IP allowlist), (4) ləğv/halt zamanı proses qrupunun SIGKILL edilməsi.
+HTTP CLI adapters run inside mandatory namespace isolation and a request broker.
+Other children fail closed when no applicable mediation adapter is available.
+Standalone installer/version probes outside a scan are provisioning operations.
 """
 from __future__ import annotations
 
@@ -52,7 +17,7 @@ from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
 from .adapters.base import (ProcResult, derive_targets, reset_process_guard,
-                            run_process, set_process_guard)
+                            set_process_guard)
 from .scope import ScopeError, extract_host, normalize_host
 
 DEFAULT_TTL = 300.0          # DNS nəticəsinin keçərlilik müddəti (saniyə)
@@ -124,13 +89,14 @@ class EgressController:
                  ttl: float = DEFAULT_TTL, clock: Callable[[], float] | None = None,
                  resolved_store: dict | None = None,
                  audit: list | None = None,
-                 sandbox: str | None = None):
+                 sandbox: str | None = None, policy=None):
         self.auth = authorization
         self._resolver = resolver or system_resolver
         self.ttl = float(ttl)
         self._clock = clock or time.monotonic
         self.resolved_store = resolved_store if resolved_store is not None else {}
         self.audit: list = audit if audit is not None else []
+        self.mediation_policy = policy
         self.sandbox = sandbox
         self._sandbox_warned = False
 
@@ -152,9 +118,8 @@ class EgressController:
                               targets: Iterable[str] | None) -> tuple[ProcResult | None, dict | None]:
         """`run_process` qapısı: (blok_nəticəsi|None, əlavə_env|None) qaytarır.
 
-        Açıq `targets` ilə command içindəki URL-lər birləşdirilir; heç biri
-        yoxdursa (lokal alət) qapı heç nə etmir. Scope xarici və ya DNS-i
-        həll olunmayan hədəf varsa proses bloklanır (fail-closed) + audit.
+        Target preflight preserves diagnostic reasons. Even an authorized
+        command is blocked until generated requests can be mediated.
         """
         from .authorization import RuleForbidden
         try:
@@ -162,50 +127,68 @@ class EgressController:
         except RuleForbidden:
             self.audit.append({"event": "egress_blocked", "reason": "tool_forbidden", "at": time.time()})
             return ProcResult(-1, stderr=b"egress: tool forbidden by RoE", blocked=True), None
-        candidates: list[str] = []
-        for raw in list(targets or []):
-            if raw:
-                candidates.append(raw)
-        candidates.extend(derive_targets(cmd))
-        if not candidates:
-            return None, None
-        tset = await self.authorize_process_targets(candidates)
-        if tset.rejected:
-            denied = [u for u, _ in tset.rejected]
-            self.audit.append({"event": "egress_blocked", "reason": "scope",
-                               "targets": denied, "at": time.time()})
-            return ProcResult(-1, stderr=b"egress: out-of-scope target blocked",
-                              blocked=True), None
-        unresolved = [h for h in tset.hostnames if not tset.resolved.get(h)]
-        if unresolved:
-            self.audit.append({"event": "egress_blocked", "reason": "dns",
-                               "hosts": unresolved, "at": time.time()})
-            return ProcResult(-1, stderr=b"egress: DNS resolution failed (fail-closed)",
-                              blocked=True), None
-        return None, None
+        candidates = list(targets or ()) + derive_targets(cmd)
+        if candidates:
+            tset = await self.authorize_process_targets(candidates)
+            reason = ('scope' if tset.rejected else
+                      'dns' if any(not tset.resolved.get(h) for h in tset.hostnames) else '')
+            if reason:
+                self.audit.append({'event': 'egress_blocked', 'reason': reason, 'at': time.time()})
+                return ProcResult(-1, stderr=b'egress: target preflight failed', blocked=True), None
+        self.audit.append({"event": "egress_blocked", "reason": "unmediated_subprocess", "at": time.time()})
+        return ProcResult(-1, stderr=b"egress: per-request mediation unavailable; subprocess blocked",
+                          blocked=True), None
 
     async def run(self, cmd: list[str], *, targets: Iterable[str] = (),
                   stdin: bytes | None = None, timeout: float = 600,
-                  cancel_event: "asyncio.Event | None" = None) -> ProcResult:
+                  cancel_event: "asyncio.Event | None" = None,
+                  mounts: Iterable = ()) -> ProcResult:
         """Mühərriklər üçün TƏK icazəli alt-proses başlatma nöqtəsi.
 
         Qapını (scope + fail-closed DNS) tətbiq edir, mümkünsə firejail
         sandbox-u (DNS pin + IP allowlist) ilə işə salır və audit yazır.
         """
-        target_list = [t for t in targets if t]
-        prefix, cleanup = await self._sandbox_prefix(target_list)
-        real_cmd = list(prefix) + list(cmd) if prefix else list(cmd)
+        return await self.run_mediated(cmd, targets=targets, stdin=stdin,
+                                       timeout=timeout, cancel_event=cancel_event,
+                                       mounts=mounts)
+
+    async def run_mediated(self, cmd, *, targets=(), stdin=None, timeout=600,
+                           cancel_event=None, mounts=()):
+        from .authorization import RuleForbidden
+        from .mediation import PROXY_FLAGS, run_mediated
+        from pathlib import Path
         try:
-            with self.activate():
-                return await run_process(real_cmd, stdin=stdin, timeout=timeout,
-                                         cancel_event=cancel_event,
-                                         targets=target_list)
-        finally:
-            for path in cleanup:
-                try:
-                    os.unlink(path)
-                except OSError:
-                    pass
+            self.auth.require_command(cmd)
+        except RuleForbidden:
+            return ProcResult(-1, stderr=b'egress: tool forbidden by RoE', blocked=True)
+        from .offline_tools import is_offline_command, is_version_probe, run_offline
+        if is_offline_command(cmd) or is_version_probe(cmd):
+            return await run_offline(self, cmd, stdin=stdin, timeout=timeout,
+                                     cancel_event=cancel_event, mounts=mounts)
+        if Path(cmd[0]).name == 'dnsx':
+            from .dns_mediation import run_dns_tool
+            return await run_dns_tool(self, cmd, stdin=stdin, timeout=timeout, cancel_event=cancel_event)
+        if Path(cmd[0]).name == 'jsluice':
+            from .offline_tools import run_remote_jsluice
+            return await run_remote_jsluice(self, cmd, stdin=stdin, timeout=timeout, cancel_event=cancel_event)
+        if Path(cmd[0]).name in {'naabu', 'nmap'}:
+            from .socket_tools import run_socket_tool
+            from .authorization import NotAuthorized
+            try:
+                return await run_socket_tool(self, cmd, targets=targets, stdin=stdin,
+                                             timeout=timeout, cancel_event=cancel_event)
+            except (NotAuthorized, RuleForbidden):
+                return ProcResult(-1, stderr=b'egress: socket target or operation not authorized', blocked=True)
+        if Path(cmd[0]).name not in PROXY_FLAGS:
+            blocked, _ = await self.prepare_process(cmd, targets)
+            return blocked
+        if self.mediation_policy is None:
+            from .mediation import BrokerPolicy
+            self.mediation_policy = BrokerPolicy(self.auth.scope, max_concurrency=4, max_retries=0)
+            self.mediation_policy.authorization = self.auth
+        # Per-request mediation, not a command-line target allowlist, is the boundary.
+        return await run_mediated(self, cmd, stdin=stdin, timeout=timeout,
+                                  cancel_event=cancel_event, mounts=mounts)
 
     # ------------------------------------------------------ OS sandbox (opsional)
     def _sandbox_mode(self) -> str:

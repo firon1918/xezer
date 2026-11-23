@@ -52,7 +52,11 @@ async def test_e2e3_4_5_7_offline_import_to_approved_auth_tests(tmp_db, write_co
     from qbh.ingest.request_graph import RequestGraph
     edges = RequestGraph(sid).edges()
     assert edges and all(e['provenance'] and 0 <= e['confidence'] <= 1 for e in edges)
-    assert await run(build_parser().parse_args(['--config', cfg, '--test-plan', '--scan-id', str(sid), '--approve'])) == 0
+    selected = db.get_db().execute(
+        "SELECT id FROM test_plans WHERE scan_id=? AND vuln_class='idor' ORDER BY id", (sid,)).fetchall()
+    for row in selected:
+        assert await run(build_parser().parse_args(
+            ['--config', cfg, '--test-plan', '--scan-id', str(sid), '--approve', row['id']])) == 0
     plans = db.get_db().execute('SELECT vuln_class,status,reason FROM test_plans WHERE scan_id=?', (sid,)).fetchall()
     assert len({r['vuln_class'] for r in plans}) == 15
     assert all(r['reason'] for r in plans)

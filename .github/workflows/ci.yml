@@ -5,7 +5,7 @@ name: CI
 # CI HƏÇ VAXT xarici hədəfə şəbəkə trafiki göndərmir.
 on:
   push:
-    branches: ["main", "coderabbit/complete-phases-three-eight/b3af3e33"]
+    branches: ["main", "coderabbit/complete-phases-three-eight/b3af3e33", "feature/security-hardening-capability-expansion"]
   pull_request:
     branches: ["main"]
   workflow_dispatch:
@@ -30,7 +30,13 @@ jobs:
 
   test:
     name: Tests (py${{ matrix.python-version }})
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: since 2026-11-19 that resolves to ubuntu-26.04,
+    # whose AppArmor 5.0 loads bwrap-userns-restrict and stacks every bwrap child
+    # into unpriv_bwrap with "audit deny capability". The trusted runner then
+    # cannot hold CAP_NET_ADMIN, so loopback/netfilter setup fails closed (125).
+    # 24.04 ships that profile only in extra-profiles (never loaded), so the
+    # sysctl below suffices. Never relax XEzer isolation to fit a newer image.
+    runs-on: ubuntu-24.04
     strategy:
       fail-fast: false
       matrix:
@@ -43,6 +49,13 @@ jobs:
           cache: pip
       - name: Install dev dependencies
         run: pip install -r requirements-dev.txt
+      - name: Mandatory mediation sandbox prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bubblewrap ffuf
+          if [ -e /proc/sys/kernel/apparmor_restrict_unprivileged_userns ]; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
       - name: Byte-compile (import/syntax gate)
         run: python -m compileall -q qbh main.py
       - name: Stable benchmark without overwriting baseline

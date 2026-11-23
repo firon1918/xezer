@@ -107,7 +107,8 @@ class SourceCodeEngine(OffensiveEngine):
             # Faza 1.2: git-dumper hədəfi TƏK egress qapısından keçir
             # (scope + fail-closed DNS pinning).
             proc = await self.ctx.egress.run(
-                ["git-dumper", url, tmp], targets=[url], timeout=self.timeout)
+                ["git-dumper", url, tmp], targets=[url], timeout=self.timeout,
+                mounts=[(tmp, True)])
             if proc.blocked:
                 res.warn(f"{sub}: egress qapısı git-dumper-ı bloklandı")
                 return
@@ -123,16 +124,20 @@ class SourceCodeEngine(OffensiveEngine):
 
     async def _semgrep(self, path: str, fid: int, res: EngineResult,
                        sub: str) -> None:
-        from ..adapters.base import run_process
-
         if not os.path.exists(SEMGREP_RULES):
             res.warn("qbh semgrep qaydaları tapılmadı")
             return
+        # Offline statik analiz: dump qovluğu read-only mount olunur, şəbəkə
+        # yoxdur. --metrics=off semgrep-in telemetriya əlaqəsini söndürür.
         cmd = ["semgrep", "--config", SEMGREP_RULES, "--json", "--quiet",
-               "--timeout", "120", path]
-        proc = await run_process(cmd, timeout=self.timeout)
+               "--metrics=off", "--timeout", "120", path]
+        proc = await self.ctx.egress.run(cmd, timeout=self.timeout,
+                                         mounts=[(path, False)])
         if proc.missing:
             res.warn("semgrep tapılmadı")
+            return
+        if proc.blocked:
+            res.warn(f"{sub}: egress qapısı semgrep-i bloklandı")
             return
         try:
             data = json.loads(proc.stdout.decode(errors="ignore") or "{}")

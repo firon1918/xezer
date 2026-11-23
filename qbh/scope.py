@@ -65,9 +65,10 @@ def normalize_host(value: str) -> str:
         except UnicodeError as exc:
             raise ScopeError(f"IDNA çevrilməsi alınmadı: {value!r}") from exc
 
+    if "%" in host:
+        raise ScopeError("IPv6 zone identifiers are not supported")
     try:
-        ipaddress.ip_address(host)
-        return host
+        return str(ipaddress.ip_address(host))
     except ValueError:
         pass
 
