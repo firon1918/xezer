@@ -1,12 +1,14 @@
-# gitleaks konfiqurasiyası.
-# Test fixture-ları redaction/maskalama davranışını yoxlamaq üçün UYDURMA
-# (saxta) secret oxşarları saxlayır — bunlar real açarlar deyil.
-# Yalnız `tests/` qovluğu allowlist-ə salınır; real kod bazası skan edilir.
 [extend]
 useDefault = true
 
 [[allowlists]]
-description = "Fake secrets in test fixtures (redaction tests)"
+description = "Fake secrets in all Python test fixtures"
 paths = [
   '''tests/.*\.py''',
+]
+
+[[allowlists]]
+description = "RFC 6238 synthetic test vectors"
+paths = [
+  '''tests/test_auth_variants\.py''',
 ]
